@@ -4,6 +4,7 @@
 // one heap string for the last error. No Swift types, no callbacks, no
 // Objective-C runtime poking from Rust.
 
+use CoreGraphics
 import Foundation
 
 private let errorLock = NSLock()

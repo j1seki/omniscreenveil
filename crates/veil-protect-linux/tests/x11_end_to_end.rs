@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! End-to-end X11 test against a real (virtual) X server.
 //!
 //! Proves, with pixels, that:
