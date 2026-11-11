@@ -28,6 +28,7 @@ veil-verify = { path = "../../../crates/veil-verify" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 veil-protect-linux = { path = "../../../crates/veil-protect-linux" }
+veil-protect-wayland = { path = "../../../crates/veil-protect-wayland" }
 
 [target.'cfg(windows)'.dependencies]
 veil-protect-win = { path = "../../../crates/veil-protect-win" }

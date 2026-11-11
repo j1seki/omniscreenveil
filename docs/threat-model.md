@@ -43,8 +43,13 @@ willingly captures the window outside OmniScreenVeil.
 - The Surface compositor sees the desktop through the same capture path the
   audience would. Protected rectangles are replaced after capture, before the
   frame is presented.
-- The Surface must never capture itself. The app masks its own window rectangle
-  to avoid recursive compositing.
+- The Surface must never capture itself. On X11 with a compositor and on macOS
+  (ScreenCaptureKit `SCContentFilter`), the app's own control and Surface
+  windows are excluded before compositing; on bare X11 and on Wayland
+  (`grim`/wlr-screencopy), their rectangles are masked to prevent recursion.
+  On a single-monitor Wayland setup the Surface window's own rectangle will
+  therefore appear checker-filled if it sits on the captured output; placing the
+  Surface window on a second monitor avoids that overlap.
 - On Wayland, the portal may deliver a stream with geometry the compositor does
   not expose. Until a provider supplies window rectangles, the Surface is
   partial and the app falls back to mirroring one window.

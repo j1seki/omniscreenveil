@@ -241,12 +241,16 @@ public enum VeilMac {
                 let content = try await SCShareableContent.excludingDesktopWindows(
                     false, onScreenWindowsOnly: true
                 )
-                guard let display = content.displays.first(where: { $0.displayID == displayID })
+                let wanted = displayID == 0 ? CGMainDisplayID() : displayID
+                guard let display = content.displays.first(where: { $0.displayID == wanted })
                     ?? content.displays.first
                 else {
                     throw VeilMacError.captureUnavailable("no displays reported by ScreenCaptureKit")
                 }
-                let filter = SCContentFilter(display: display, excludingWindows: [])
+                let filter = SCContentFilter(
+                    display: display,
+                    excludingWindows: ownWindows(in: content)
+                )
                 let config = SCStreamConfiguration()
                 config.width = display.width
                 config.height = display.height

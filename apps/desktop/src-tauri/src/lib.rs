@@ -16,7 +16,6 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager, State};
 use veil_core::capability::{PlatformCapabilities, ProtectionMode};
 use veil_core::ids::{AppKey, RuleId, WindowId};
-use veil_core::reconcile::intents;
 use veil_core::state::AppliedProtection;
 use veil_core::{ConfigStore, FillStyle, Profile, Size};
 use veil_protect::{Engine, TickReport};
@@ -212,21 +211,32 @@ fn release_all(state: State<'_, Mutex<AppState>>) -> Result<ReleaseReport, Strin
 fn preview(state: State<'_, Mutex<AppState>>) -> Result<SurfacePreview, String> {
     let state = lock(&state)?;
     let windows = state.engine.backend.list_windows()?;
-    let (desired, _) = intents(&state.engine.profile, &windows);
-    let surface: BTreeSet<WindowId> = desired
-        .iter()
-        .filter(|intent| {
-            state.engine.caps.effective_mode(intent.mode) == ProtectionMode::Surface
+    // Mask only what the engine has actually applied. Deriving this from the
+    // profile would keep painting the veil after "Release all", so the preview
+    // would disagree with the applied set and with strict hide.
+    let surface: BTreeSet<WindowId> = state
+        .engine
+        .applied()
+        .into_iter()
+        .filter(|protection| {
+            protection.status.is_applied() && protection.mode == ProtectionMode::Surface
         })
-        .map(|intent| intent.window)
+        .map(|protection| protection.window)
         .collect();
 
+    // X11 and macOS exclude our windows inside the capture; Wayland's
+    // screencopy sees the whole output, so its own windows are veiled out.
+    let own_windows = if state.engine.backend.capture_includes_own_windows() {
+        state.engine.backend.own_windows()
+    } else {
+        Vec::new()
+    };
     let (source_frame, source_label) = match state.engine.backend.capture_frame() {
         Some(frame) => {
-            let label = if state.engine.backend.own_window().is_some() {
-                "live capture · own window masked to prevent recursion"
-            } else {
+            let label = if own_windows.is_empty() {
                 "live capture"
+            } else {
+                "live capture · own windows masked to prevent recursion"
             };
             (frame, label)
         }
@@ -245,7 +255,7 @@ fn preview(state: State<'_, Mutex<AppState>>) -> Result<SurfacePreview, String> 
             }
         }
     }
-    if let Some(own) = state.engine.backend.own_window() {
+    for own in own_windows {
         plan = plan.exclude(own);
     }
     let rendered = veil_surface::render(&source_frame, &plan);
@@ -389,6 +399,37 @@ fn toggle_now(app: &tauri::AppHandle) {
     }
 }
 
+/// Open (or focus) the clean window the user shares.
+///
+/// The main window contains controls and is not what an audience should see.
+/// This second webview renders only the composited frame, polls `preview`, and
+/// carries no chrome. It is created lazily so a user who only needs Exclusion
+/// never pays for it.
+fn open_surface_window(app: &tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("surface") {
+        let _ = window.show();
+        let _ = window.set_focus();
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(
+        app,
+        "surface",
+        tauri::WebviewUrl::App("index.html?surface=1".into()),
+    )
+    .title("OmniScreenVeil Surface")
+    .inner_size(960.0, 600.0)
+    .min_inner_size(480.0, 320.0)
+    .background_color(tauri::window::Color(11, 13, 18, 255))
+    .build()
+    .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn open_surface(app: tauri::AppHandle) -> Result<(), String> {
+    open_surface_window(&app)
+}
+
 pub fn run() {
     let store = ConfigStore::default_path();
     let profile = match ConfigStore::new(&store).load() {
@@ -436,14 +477,17 @@ pub fn run() {
             release_all,
             preview,
             verify,
+            open_surface,
         ])
         .setup(move |app| {
             let open = MenuItem::with_id(app, "open", "Open OmniScreenVeil", true, None::<&str>)?;
+            let surface =
+                MenuItem::with_id(app, "surface", "Open Surface window", true, None::<&str>)?;
             let arm = MenuItem::with_id(app, "arm", "Arm / disarm (Ctrl+Shift+V)", true, None::<&str>)?;
             let release =
                 MenuItem::with_id(app, "release", "Release all protection", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &arm, &release, &quit])?;
+            let menu = Menu::with_items(app, &[&open, &surface, &arm, &release, &quit])?;
 
             TrayIconBuilder::new()
                 .icon(
@@ -461,6 +505,11 @@ pub fn run() {
                             let _ = window.set_focus();
                         }
                     }
+                    "surface" => {
+                        if let Err(err) = open_surface_window(app) {
+                            eprintln!("veil: could not open surface window: {err}");
+                        }
+                    }
                     "arm" => toggle_now(app),
                     "release" => release_all_now(app),
                     "quit" => app.exit(0),
@@ -468,7 +517,11 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            app.global_shortcut().register(toggle_shortcut)?;
+            // A second instance (or another app) may already own the shortcut.
+            // That must not abort startup: the tray menu and the UI still work.
+            if let Err(err) = app.global_shortcut().register(toggle_shortcut) {
+                eprintln!("veil: Ctrl+Shift+V is unavailable ({err}); use the tray or the UI");
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

@@ -2187,6 +2187,7 @@ dependencies = [
  "veil-protect",
  "veil-protect-linux",
  "veil-protect-macos",
+ "veil-protect-wayland",
  "veil-protect-win",
  "veil-surface",
  "veil-verify",
@@ -3944,6 +3945,19 @@ dependencies = [
  "veil-core",
  "veil-protect",
  "veil-surface",
+]
+
+[[package]]
+name = "veil-protect-wayland"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "veil-core",
+ "veil-protect",
+ "veil-surface",
+ "veil-verify",
 ]
 
 [[package]]

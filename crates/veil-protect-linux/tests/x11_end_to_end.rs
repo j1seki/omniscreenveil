@@ -17,6 +17,8 @@ use veil_core::ids::WindowId;
 use veil_core::{FillStyle, Rect};
 use veil_protect_linux::{create_canary_window, X11Platform};
 use veil_surface::{render as render_surface, SurfacePlan};
+use x11rb::connection::Connection;
+use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, PropMode};
 
 struct Xvfb(Child);
 
@@ -105,7 +107,46 @@ fn x11_canary_is_captured_masked_and_hidden() {
         "canary must be visible in the root capture before protection"
     );
 
-    // 1. Surface mode removes the window from the shareable frame.
+    // 1. The Veil Surface does not capture the root: it composites foreign
+    // windows and drops its own process's windows, which is what prevents the
+    // Surface window from recursing into itself.
+    let composite_all = platform
+        .capture_desktop_excluding(0)
+        .expect("composite every window");
+    assert!(
+        detect(&composite_all, token, cell).found,
+        "the composited desktop must include a foreign window"
+    );
+
+    // Mark the canary as owned by this process. `capture_desktop` must then
+    // drop it, exactly as it drops the app's own control and Surface windows.
+    let (conn, _) = x11rb::connect(Some(&display)).expect("second X11 connection");
+    let pid_atom = conn
+        .intern_atom(false, b"_NET_WM_PID")
+        .expect("intern _NET_WM_PID")
+        .reply()
+        .expect("intern reply")
+        .atom;
+    conn.change_property(
+        PropMode::REPLACE,
+        wid,
+        pid_atom,
+        AtomEnum::CARDINAL,
+        32,
+        1,
+        &(std::process::id()).to_ne_bytes(),
+    )
+    .expect("set _NET_WM_PID");
+    conn.flush().expect("flush");
+    let composite_own = platform
+        .capture_desktop()
+        .expect("composite without own windows");
+    assert!(
+        !detect(&composite_own, token, cell).found,
+        "the composited desktop must exclude the app's own windows"
+    );
+
+    // 2. Surface mode removes protected windows from the shareable frame.
     let size = platform.root_size().expect("root size");
     let plan = SurfacePlan::new(size, FillStyle::veiled()).exclude(window.bounds);
     let frame = platform.capture_root().expect("capture");

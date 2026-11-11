@@ -412,13 +412,22 @@ export default function App() {
                     : "Rendering…"}
                 </p>
               </div>
-              <button
-                className="btn ghost"
-                onClick={() => void refresh("preview")}
-                disabled={busyMode}
-              >
-                Render
-              </button>
+              <div className="panel-actions">
+                <button
+                  className="btn ghost"
+                  onClick={() => void refresh("preview")}
+                  disabled={busyMode}
+                >
+                  Render
+                </button>
+                <button
+                  className="btn"
+                  onClick={() => void api.openSurface().catch((err) => setError(String(err)))}
+                  disabled={busyMode}
+                >
+                  Open window
+                </button>
+              </div>
             </div>
             <div className="preview-frame">
               {preview?.png_base64 ? (

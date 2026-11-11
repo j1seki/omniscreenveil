@@ -17,6 +17,7 @@ use thiserror::Error;
 use veil_core::geometry::{Rect, Size};
 use veil_core::ids::{AppKey, WindowId};
 use veil_core::state::ProtectionIntent;
+use veil_core::style::Color;
 use veil_core::window::{Platform, WindowInfo};
 use veil_core::ProtectionMode;
 use veil_protect::{BackendError, ProtectionBackend};
@@ -24,6 +25,7 @@ use veil_surface::{Frame, PixelFormat};
 use veil_verify::{CaptureError, CaptureSource};
 
 use x11rb::connection::Connection;
+use x11rb::protocol::composite::ConnectionExt as CompositeExt;
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ConnectionExt, CreateWindowAux, EventMask, ImageFormat, MapState, Window,
     WindowClass,
@@ -90,6 +92,7 @@ impl Atoms {
 pub struct X11Platform {
     conn: RustConnection,
     root: Window,
+    screen_num: usize,
     atoms: Atoms,
 }
 
@@ -102,11 +105,47 @@ impl X11Platform {
         let (conn, screen_num) = x11rb::connect(display)?;
         let root = conn.setup().roots[screen_num].root;
         let atoms = Atoms::intern(&conn)?;
-        Ok(Self { conn, root, atoms })
+        Ok(Self {
+            conn,
+            root,
+            screen_num,
+            atoms,
+        })
     }
 
     pub fn root(&self) -> Window {
         self.root
+    }
+
+    /// Whether an X11 compositing manager currently owns this screen.
+    ///
+    /// A compositor keeps a complete offscreen pixmap per window, which lets
+    /// the Surface capture a window even when another window covers it. Without
+    /// one, obscured pixels simply do not exist offscreen, so the backend falls
+    /// back to a root capture and masks its own windows instead.
+    pub fn has_compositor(&self) -> bool {
+        let name = format!("_NET_WM_CM_S{}", self.screen_num);
+        let Ok(atom) = self.conn.intern_atom(false, name.as_bytes()) else {
+            return false;
+        };
+        let Ok(atom) = atom.reply().map(|reply| reply.atom) else {
+            return false;
+        };
+        self.conn
+            .get_selection_owner(atom)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .map(|reply| reply.owner != x11rb::NONE)
+            .unwrap_or(false)
+    }
+
+    /// The capture the Surface should use on this session.
+    pub fn capture_surface(&self) -> Result<Frame, X11Error> {
+        if self.has_compositor() {
+            self.capture_desktop()
+        } else {
+            self.capture_root()
+        }
     }
 
     pub fn root_size(&self) -> Result<Size, X11Error> {
@@ -299,15 +338,23 @@ impl X11Platform {
         Ok(())
     }
 
-    /// Bounds of this process's largest mapped window.
+    /// Bounds of every mapped window owned by this process.
     ///
     /// The Veil Surface must never contain itself, otherwise the shared frame
-    /// recurses into the app UI. The compositor paints the veiled placeholder
-    /// over this rectangle instead.
-    pub fn own_window_bounds(&self) -> Option<Rect> {
-        let tree = self.conn.query_tree(self.root).ok()?.reply().ok()?;
+    /// recurses into the app UI. This includes both the main window and a
+    /// separate Surface window, so the compositor paints the placeholder over
+    /// all of them.
+    pub fn own_windows(&self) -> Vec<Rect> {
+        let Some(tree) = self
+            .conn
+            .query_tree(self.root)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+        else {
+            return Vec::new();
+        };
         let pid = std::process::id();
-        let mut best: Option<Rect> = None;
+        let mut out = Vec::new();
         for id in tree.children {
             let Some(attrs) = self
                 .conn
@@ -342,17 +389,183 @@ impl X11Platform {
             else {
                 continue;
             };
-            let rect = Rect::new(
+            out.push(Rect::new(
                 translated.dst_x as i32,
                 translated.dst_y as i32,
                 geom.width as u32,
                 geom.height as u32,
-            );
-            if best.map_or(true, |current| rect.area() > current.area()) {
-                best = Some(rect);
-            }
+            ));
         }
-        best
+        out
+    }
+
+    /// Capture the desktop by compositing foreign top-level windows.
+    ///
+    /// The Veil Surface lives in its own window. Capturing the root would
+    /// include that window, whose content is the surface itself, so the frame
+    /// would recurse. Instead this walks the root's children in stacking order
+    /// and copies *other* applications into an empty frame. Our own windows
+    /// are never part of the result, which also means the audience never sees
+    /// the control UI or the Surface window.
+    ///
+    /// When a compositing manager is running, `NameWindowPixmap` gives the full
+    /// window contents even where another window overlaps it. Without a
+    /// compositor the code falls back to `GetImage` on the window, which is
+    /// correct for visible regions; the X11 end-to-end test covers that case.
+    pub fn capture_desktop(&self) -> Result<Frame, X11Error> {
+        self.capture_desktop_excluding(std::process::id())
+    }
+
+    /// Same as [`Self::capture_desktop`], but with an explicit process to
+    /// exclude. `0` includes every window, which is what the end-to-end test
+    /// uses to prove the compositing path sees real pixels.
+    pub fn capture_desktop_excluding(&self, own_pid: u32) -> Result<Frame, X11Error> {
+        let geom = self.conn.get_geometry(self.root)?.reply()?;
+        let width = geom.width as u32;
+        let height = geom.height as u32;
+        let mut frame = Frame::filled(width, height, PixelFormat::Bgra8, Color::BLACK);
+        let tree = self.conn.query_tree(self.root)?.reply()?;
+        // XQueryTree returns children bottom-to-top, which is the order we need
+        // to paint them.
+        for id in tree.children {
+            let Some(attrs) = self
+                .conn
+                .get_window_attributes(id)
+                .ok()
+                .and_then(|cookie| cookie.reply().ok())
+            else {
+                continue;
+            };
+            if attrs.map_state != MapState::VIEWABLE || attrs.override_redirect {
+                continue;
+            }
+            if own_pid != 0 && self.cardinal(id, self.atoms.wm_pid) == Some(own_pid) {
+                continue;
+            }
+            let Some(geometry) = self
+                .conn
+                .get_geometry(id)
+                .ok()
+                .and_then(|cookie| cookie.reply().ok())
+            else {
+                continue;
+            };
+            if geometry.width < 32 || geometry.height < 32 {
+                continue;
+            }
+            let Some(translated) = self
+                .conn
+                .translate_coordinates(id, self.root, 0, 0)
+                .ok()
+                .and_then(|cookie| cookie.reply().ok())
+            else {
+                continue;
+            };
+            let Ok(source) = self.capture_window_tree(id) else {
+                continue;
+            };
+            frame.blit_from(
+                &source,
+                Rect::new(
+                    translated.dst_x as i32,
+                    translated.dst_y as i32,
+                    geometry.width as u32,
+                    geometry.height as u32,
+                ),
+            );
+        }
+        Ok(frame)
+    }
+
+    /// Capture a window and every mapped child below it.
+    ///
+    /// A top-level X11 window often only paints its background; widgets live in
+    /// child windows (xmessage is a simple example, GTK apps are the general
+    /// case). Capturing just the top-level yields an empty rectangle, so the
+    /// subtree is composited bottom-to-top. With a compositing manager,
+    /// `NameWindowPixmap` also supplies pixels that are currently obscured.
+    fn capture_window_tree(&self, id: Window) -> Result<Frame, X11Error> {
+        let geometry = self.conn.get_geometry(id)?.reply()?;
+        if geometry.width == 0 || geometry.height == 0 {
+            return Ok(Frame::filled(0, 0, PixelFormat::Bgra8, Color::BLACK));
+        }
+        let mut frame = match self.capture_window_pixmap(id, geometry.width, geometry.height) {
+            Some(frame) => frame,
+            // Bare X server without a compositor: read the window on screen.
+            None => self.capture_drawable(id, geometry.width, geometry.height)?,
+        };
+
+        let tree = self.conn.query_tree(id)?.reply()?;
+        for child in tree.children {
+            let Some(attrs) = self
+                .conn
+                .get_window_attributes(child)
+                .ok()
+                .and_then(|cookie| cookie.reply().ok())
+            else {
+                continue;
+            };
+            if attrs.map_state != MapState::VIEWABLE {
+                continue;
+            }
+            let Some(child_geometry) = self
+                .conn
+                .get_geometry(child)
+                .ok()
+                .and_then(|cookie| cookie.reply().ok())
+            else {
+                continue;
+            };
+            let Some(position) = self
+                .conn
+                .translate_coordinates(child, id, 0, 0)
+                .ok()
+                .and_then(|cookie| cookie.reply().ok())
+            else {
+                continue;
+            };
+            let Ok(subtree) = self.capture_window_tree(child) else {
+                continue;
+            };
+            frame.blit_from(
+                &subtree,
+                Rect::new(
+                    position.dst_x as i32,
+                    position.dst_y as i32,
+                    child_geometry.width as u32,
+                    child_geometry.height as u32,
+                ),
+            );
+        }
+        Ok(frame)
+    }
+
+    /// Window contents from the compositor's offscreen pixmap, when available.
+    fn capture_window_pixmap(&self, id: Window, width: u16, height: u16) -> Option<Frame> {
+        let pixmap = self.conn.generate_id().ok()?;
+        let cookie = self.conn.composite_name_window_pixmap(id, pixmap).ok()?;
+        if cookie.check().is_err() {
+            return None;
+        }
+        let captured = self.capture_drawable(pixmap, width, height);
+        let _ = self.conn.free_pixmap(pixmap);
+        captured.ok()
+    }
+
+    fn capture_drawable(&self, drawable: u32, width: u16, height: u16) -> Result<Frame, X11Error> {
+        let image = self
+            .conn
+            .get_image(
+                ImageFormat::Z_PIXMAP,
+                drawable,
+                0,
+                0,
+                width,
+                height,
+                u32::MAX,
+            )?
+            .reply()?;
+        frame_from_image(image, width as u32, height as u32)
     }
 
     /// Capture the whole virtual desktop as BGRA.
@@ -370,39 +583,47 @@ impl X11Platform {
                 u32::MAX,
             )?
             .reply()?;
-        let bits = self
-            .conn
-            .setup()
-            .pixmap_formats
-            .iter()
-            .find(|format| format.depth == image.depth)
-            .map(|format| format.bits_per_pixel)
-            .ok_or(X11Error::UnsupportedDepth { bits: image.depth })?;
-        let pixels = match bits {
-            32 => {
-                let mut data = image.data;
-                for pixel in data.chunks_exact_mut(4) {
-                    pixel[3] = 255;
-                }
-                data
+        frame_from_image(image, geom.width as u32, geom.height as u32)
+    }
+}
+
+fn frame_from_image(
+    image: x11rb::protocol::xproto::GetImageReply,
+    width: u32,
+    height: u32,
+) -> Result<Frame, X11Error> {
+    let bits =
+        bits_for_depth(image.depth).ok_or(X11Error::UnsupportedDepth { bits: image.depth })?;
+    let pixels = match bits {
+        32 => {
+            let mut data = image.data;
+            for pixel in data.chunks_exact_mut(4) {
+                pixel[3] = 255;
             }
-            24 => {
-                // Expand BGR into BGRA.
-                let mut out = Vec::with_capacity(image.data.len() / 3 * 4);
-                for pixel in image.data.chunks_exact(3) {
-                    out.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
-                }
-                out
+            data
+        }
+        24 => {
+            // Expand BGR into BGRA.
+            let mut out = Vec::with_capacity(image.data.len() / 3 * 4);
+            for pixel in image.data.chunks_exact(3) {
+                out.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
             }
-            other => return Err(X11Error::UnsupportedDepth { bits: other }),
-        };
-        Frame::from_bytes(
-            geom.width as u32,
-            geom.height as u32,
-            PixelFormat::Bgra8,
-            pixels,
-        )
+            out
+        }
+        other => return Err(X11Error::UnsupportedDepth { bits: other }),
+    };
+    Frame::from_bytes(width, height, PixelFormat::Bgra8, pixels)
         .map_err(|_| X11Error::UnsupportedDepth { bits })
+}
+
+/// Bits per pixel for a supported screen depth. X11 exposes this through the
+/// connection's pixmap formats, which the caller no longer has once the image
+/// has been decoded.
+fn bits_for_depth(depth: u8) -> Option<u8> {
+    match depth {
+        24 | 32 => Some(32),
+        16 => Some(16),
+        _ => None,
     }
 }
 
@@ -434,12 +655,16 @@ impl CaptureSource for X11Capture {
 
     fn capture(&mut self) -> Result<Frame, CaptureError> {
         self.platform
-            .capture_root()
+            .capture_surface()
             .map_err(|e| CaptureError::Failed(e.to_string()))
     }
 
     fn label(&self) -> String {
-        "X11 root capture".to_string()
+        if self.platform.has_compositor() {
+            "X11 window composite (own windows excluded)".to_string()
+        } else {
+            "X11 root capture (no compositing manager; own windows masked)".to_string()
+        }
     }
 }
 
@@ -474,8 +699,8 @@ impl X11Backend {
         &self.hidden
     }
 
-    pub fn own_window_bounds(&self) -> Option<Rect> {
-        self.platform.own_window_bounds()
+    pub fn own_windows(&self) -> Vec<Rect> {
+        self.platform.own_windows()
     }
 }
 

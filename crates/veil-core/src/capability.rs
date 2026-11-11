@@ -163,7 +163,14 @@ impl PlatformCapabilities {
                             .into(),
                     },
                 );
-                modes.insert(ProtectionMode::StrictHide, CapabilityLevel::Native);
+                modes.insert(
+                    ProtectionMode::StrictHide,
+                    CapabilityLevel::Partial {
+                        detail: "Works on sway and Hyprland through compositor IPC; GNOME Shell \
+                                 and KDE Plasma need a desktop-specific extension."
+                            .into(),
+                    },
+                );
             }
         }
         Self { platform, modes }
@@ -226,6 +233,7 @@ mod tests {
     fn wayland_surface_is_partial() {
         let caps = PlatformCapabilities::for_platform(Platform::LinuxWayland);
         assert_eq!(caps.level(ProtectionMode::Surface).badge(), "partial");
+        assert_eq!(caps.level(ProtectionMode::StrictHide).badge(), "partial");
         assert_eq!(caps.best_mode(), Some(ProtectionMode::Surface));
     }
 }

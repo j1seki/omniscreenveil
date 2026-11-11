@@ -13,6 +13,8 @@ pub enum CapturePath {
     XComposite,
     XShm,
     X11GetImage,
+    /// wlr-screencopy, used by `grim` on sway/Hyprland.
+    WaylandScreencopy,
     PipeWirePortal,
     Synthetic,
 }
@@ -27,6 +29,7 @@ impl CapturePath {
             CapturePath::XComposite => "XComposite",
             CapturePath::XShm => "MIT-SHM",
             CapturePath::X11GetImage => "X11 GetImage",
+            CapturePath::WaylandScreencopy => "Wayland wlr-screencopy",
             CapturePath::PipeWirePortal => "PipeWire portal",
             CapturePath::Synthetic => "Synthetic (self-test)",
         }

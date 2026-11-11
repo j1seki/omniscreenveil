@@ -273,10 +273,18 @@ export async function capabilityMatrix(): Promise<Capabilities[]> {
             platform === "linux_wayland"
               ? {
                   level: "partial" as const,
-                  detail: "Needs a desktop-specific geometry provider; falls back to mirroring one window.",
+                  detail:
+                    "Sway/Hyprland: wlr-screencopy via grim plus compositor IPC geometry. GNOME/KDE fall back to portal mirroring.",
                 }
               : { level: "native" as const },
-          strict_hide: { level: "native" as const },
+          strict_hide:
+            platform === "linux_wayland"
+              ? {
+                  level: "partial" as const,
+                  detail:
+                    "Works on sway and Hyprland through compositor IPC; GNOME Shell and KDE Plasma need a desktop-specific extension.",
+                }
+              : { level: "native" as const },
         },
       };
     });
@@ -360,6 +368,22 @@ export async function releaseAll(): Promise<{ released: number; failed: string[]
 export async function preview(): Promise<SurfacePreview> {
   if (!IN_TAURI) return mockPreview();
   return invoke<SurfacePreview>("preview");
+}
+
+/// Open the clean, shareable Surface window.
+///
+/// In a browser preview this opens a second tab with `?surface=1`, which uses
+/// the same mock compositor. In Tauri the Rust side creates a second webview.
+export async function openSurface(): Promise<void> {
+  if (!IN_TAURI) {
+    window.open(
+      `${window.location.pathname}?surface=1`,
+      "_blank",
+      "width=960,height=600",
+    );
+    return;
+  }
+  return invoke<void>("open_surface");
 }
 
 export async function verify(): Promise<VerificationRun> {

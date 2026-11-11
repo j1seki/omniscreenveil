@@ -1,6 +1,6 @@
 # ADR 0003 — Wayland: compositing plus a geometry provider, never a private compositor patch
 
-- Status: accepted
+- Status: accepted; implemented for sway/Hyprland (Phase 1)
 - Date: 2026-11
 
 ## Context

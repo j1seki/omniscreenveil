@@ -1,0 +1,16 @@
+[package]
+name = "veil-protect-wayland"
+description = "Wayland backend: wlr-screencopy capture and sway/Hyprland geometry + strict hide."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+veil-core.workspace = true
+veil-protect.workspace = true
+veil-surface.workspace = true
+veil-verify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

@@ -38,8 +38,10 @@ This is a Phase 0/1 working implementation, not a finished store release.
   Phase 0 probes, but still need runtime validation on real Windows and macOS
   machines. Run the probes in [`docs/phase-0-spikes.md`](docs/phase-0-spikes.md)
   and report what you see.
-- Wayland has the architecture and the honest capability entry, not a finished
-  compositor integration.
+- Wayland now has a real backend for sway and Hyprland: `grim`/wlr-screencopy
+  capture plus compositor IPC geometry, and strict hide through the compositor's
+  own IPC. GNOME Shell and KDE Plasma lack a portable public equivalent and are
+  reported as partial until a desktop-specific provider lands.
 
 Verification is captured in [`docs/verification.md`](docs/verification.md).
 
@@ -52,7 +54,8 @@ crates/
   veil-canary        8x8 canary token renderer and detector
   veil-protect       backend trait, engine, simulated backend
   veil-verify        baseline -> arm -> capture verification harness
-  veil-protect-linux X11 backend (inventory, capture, strict hide)
+  veil-protect-linux X11 backend (inventory, composite capture, strict hide)
+  veil-protect-wayland Wayland backend for sway/Hyprland (grim + compositor IPC)
   veil-protect-win   Windows backend (injection + display affinity)
   veil-hook-win      helper DLL loaded into a selected process
   veil-protect-macos macOS backend + C ABI to the Swift helpers
@@ -91,6 +94,10 @@ cargo run -p veil-cli -- release 0x1a
 ```
 
 Desktop app:
+
+Prerequisites for the live Linux backends: X11 needs a display; sway/Hyprland
+need `grim` plus the compositor's own IPC tool (`swaymsg` or `hyprctl`). Without
+them the app falls back to a labelled simulation rather than pretending.
 
 ```sh
 cd apps/desktop
@@ -135,24 +142,36 @@ user selected, and is unloaded best-effort on release.
 
 There is no public API for one application to remove another application's
 window from ScreenCaptureKit, so `Exclusion` is reported unsupported. The Veil
-Surface uses ScreenCaptureKit to capture a display and mask the protected
-windows; strict hide uses the Accessibility `AXHidden` attribute with the
-user's consent. `platform/macos` is a small Swift package with a C ABI so the
-Rust backend can call those public APIs.
+Surface uses ScreenCaptureKit to capture a display (excluding the app's own
+windows in the `SCContentFilter` so the Surface never recurses into itself) and
+masks the protected windows; strict hide uses the Accessibility `AXHidden`
+attribute with the user's consent. `platform/macos` is a small Swift package
+with a C ABI so the Rust backend can call those public APIs.
 
 ### Linux
 
-On X11 a normal client can enumerate foreign windows, read geometry and capture
-the root window, so the Veil Surface works. Strict hide unmaps the window and
-restores it. Root capture and strict hide are proven in
+On X11 a normal client can enumerate foreign windows and read geometry, so the
+Veil Surface works. With a compositing manager (`xcompmgr`, `picom`, KWin,
+Mutter, ...) the backend composites foreign window pixmaps via XComposite
+(`NameWindowPixmap`), which captures obscured windows and drops the app's own
+control and Surface windows before the audience ever sees them. Without a
+compositor it falls back to a root capture and masks its own windows. Strict
+hide unmaps the window and restores it. All of these paths are proven in
 `crates/veil-protect-linux/tests/x11_end_to_end.rs`.
 
-On Wayland the compositor owns geometry and capture. The architecture is a
-portal/PipeWire capture plus a desktop-specific geometry provider (KWin script,
-GNOME Shell extension, sway/Hyprland IPC), with compositing in the Veil Surface.
-When no provider exists, the fallback is mirroring a single chosen window.
-`Exclusion` remains unsupported because no mainstream compositor exposes
-per-window capture exclusion.
+The desktop app also provides an **Open window** action (and tray entry) that
+opens a dedicated, chrome-free `OmniScreenVeil Surface` window — that second
+window is what you select in Discord, Zoom, OBS or a browser share dialog.
+
+On Wayland the compositor owns geometry and capture. The sway/Hyprland backend
+combines two public surfaces: `grim` (wlr-screencopy) for frames and the
+compositor's own IPC (`swaymsg -t get_tree`, `hyprctl clients -j`) for window
+rectangles and strict hide. Protected windows are masked in the composited
+Surface; strict hide moves them to a private workspace and returns them to the
+original workspace on release. GNOME Shell and KDE Plasma do not expose a
+portable equivalent, so they fall back to simulation / single-window mirroring
+and are marked partial. `Exclusion` remains unsupported because no mainstream
+compositor exposes per-window capture exclusion.
 
 ## Repository conventions
 

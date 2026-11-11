@@ -377,12 +377,7 @@ fn cmd_list(json: bool) -> Result<i32> {
                  `platform/macos/veilmac-spike list`"
             )
         }
-        Platform::LinuxWayland => {
-            bail!(
-                "Wayland does not expose foreign window geometry; use the Veil Surface \
-                 capture path or an X11 session"
-            )
-        }
+        Platform::LinuxWayland => list_wayland(json),
     }
 }
 
@@ -415,6 +410,40 @@ fn list_x11(json: bool) -> Result<i32> {
 #[cfg(not(unix))]
 fn list_x11(_json: bool) -> Result<i32> {
     bail!("X11 inventory is only available on Unix hosts")
+}
+
+#[cfg(unix)]
+fn list_wayland(json: bool) -> Result<i32> {
+    let backend = veil_protect_wayland::WaylandBackend::new()?;
+    let windows = backend.list_windows()?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&windows)?);
+    } else {
+        println!(
+            "{} — {:<10} {:<8} {:<22} {:<28} BOUNDS",
+            backend.compositor().label(),
+            "WINDOW",
+            "PID",
+            "APP",
+            "TITLE"
+        );
+        for w in &windows {
+            println!(
+                "{:<10} {:<8} {:<22} {:<28} {:?}",
+                w.id.to_string(),
+                w.pid,
+                truncate(&w.app_name, 22),
+                truncate(&w.title, 28),
+                w.bounds
+            );
+        }
+    }
+    Ok(0)
+}
+
+#[cfg(not(unix))]
+fn list_wayland(_json: bool) -> Result<i32> {
+    bail!("Wayland inventory is only available on Unix hosts")
 }
 
 #[cfg(unix)]
@@ -451,6 +480,39 @@ fn x11_plan_and_capture(
     bail!("--live requires an X11 display and a Unix host")
 }
 
+#[cfg(unix)]
+fn wayland_plan_and_capture(
+    ids: &[WindowId],
+) -> Result<(veil_surface::SurfacePlan, veil_surface::Frame)> {
+    let backend = veil_protect_wayland::WaylandBackend::new()?;
+    let windows = backend.list_windows()?;
+    for id in ids {
+        if !windows.iter().any(|w| w.id == *id) {
+            bail!("window {id} is not a live Wayland top-level window");
+        }
+    }
+    let frame = backend.capture_root()?;
+    let mut plan = veil_surface::SurfacePlan::new(frame.size(), veil_core::FillStyle::veiled());
+    for window in &windows {
+        if ids.contains(&window.id) {
+            plan = plan.exclude(window.bounds);
+        }
+    }
+    // The app's own window is part of the capture; mask it so the Surface does
+    // not recurse into itself.
+    for own in backend.own_windows() {
+        plan = plan.exclude(own);
+    }
+    Ok((plan, frame))
+}
+
+#[cfg(not(unix))]
+fn wayland_plan_and_capture(
+    _ids: &[WindowId],
+) -> Result<(veil_surface::SurfacePlan, veil_surface::Frame)> {
+    bail!("--live Wayland capture is only available on Unix hosts")
+}
+
 fn truncate(value: &str, max: usize) -> String {
     if value.chars().count() <= max {
         return value.to_string();
@@ -471,7 +533,10 @@ fn cmd_surface(json: bool, out: &PathBuf, protect: &[String], live: bool) -> Res
         .collect::<Result<_>>()?;
 
     let (plan, source) = if live {
-        x11_plan_and_capture(&ids)?
+        match Platform::detect() {
+            Platform::LinuxWayland => wayland_plan_and_capture(&ids)?,
+            _ => x11_plan_and_capture(&ids)?,
+        }
     } else {
         let size = Size::new(1280, 800);
         let windows = demo_windows();
@@ -610,21 +675,25 @@ fn parse_mode(value: &str) -> Result<ProtectionMode> {
 
 fn cmd_protect(json: bool, window: &str, mode: &str) -> Result<i32> {
     let platform = Platform::detect();
-    if platform != Platform::LinuxX11 {
-        bail!(
-            "`veil protect` currently drives the X11 backend; on {} use the desktop app",
+    match platform {
+        Platform::LinuxX11 => x11_protect(json, parse_window_id(window)?, parse_mode(mode)?),
+        Platform::LinuxWayland => {
+            wayland_protect(json, parse_window_id(window)?, parse_mode(mode)?)
+        }
+        _ => bail!(
+            "`veil protect` drives the Linux backends; on {} use the desktop app",
             platform.label()
-        );
+        ),
     }
-    x11_protect(json, parse_window_id(window)?, parse_mode(mode)?)
 }
 
 fn cmd_release(json: bool, window: &str) -> Result<i32> {
     let platform = Platform::detect();
-    if platform != Platform::LinuxX11 {
-        bail!("`veil release` currently drives the X11 backend");
+    match platform {
+        Platform::LinuxX11 => x11_release(json, parse_window_id(window)?),
+        Platform::LinuxWayland => wayland_release(json, parse_window_id(window)?),
+        _ => bail!("`veil release` drives the Linux backends"),
     }
-    x11_release(json, parse_window_id(window)?)
 }
 
 #[cfg(unix)]
@@ -665,6 +734,52 @@ fn x11_release(json: bool, id: WindowId) -> Result<i32> {
 #[cfg(not(unix))]
 fn x11_release(_json: bool, _id: WindowId) -> Result<i32> {
     bail!("X11 backend is not available on this host")
+}
+
+#[cfg(unix)]
+fn wayland_protect(json: bool, id: WindowId, mode: ProtectionMode) -> Result<i32> {
+    let backend = veil_protect_wayland::WaylandBackend::new()?;
+    let windows = backend.list_windows()?;
+    if !windows.iter().any(|w| w.id == id) {
+        bail!("window {id} is not a live Wayland top-level window");
+    }
+    let mut profile = Profile::new();
+    profile.add_window_rule(id, mode);
+    let mut engine = Engine::new(profile, backend);
+    let report = engine.tick(&windows);
+    print_report(json, &report)?;
+    Ok(if report.failed.is_empty() { 0 } else { 1 })
+}
+
+#[cfg(not(unix))]
+fn wayland_protect(_json: bool, _id: WindowId, _mode: ProtectionMode) -> Result<i32> {
+    bail!("Wayland backend is not available on this host")
+}
+
+#[cfg(unix)]
+fn wayland_release(json: bool, id: WindowId) -> Result<i32> {
+    let mut backend = veil_protect_wayland::WaylandBackend::new()?;
+    // Populate workspace tracks so a strict-hidden window returns to its
+    // original workspace rather than the current one.
+    let _ = backend.list_windows();
+    veil_protect::ProtectionBackend::release(&mut backend, id)
+        .map_err(|err| anyhow!(err.to_string()))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &json!({"released": id, "compositor": backend.compositor().label()})
+            )?
+        );
+    } else {
+        println!("released {id} on {}", backend.compositor().label());
+    }
+    Ok(0)
+}
+
+#[cfg(not(unix))]
+fn wayland_release(_json: bool, _id: WindowId) -> Result<i32> {
+    bail!("Wayland backend is not available on this host")
 }
 
 fn print_report(json: bool, report: &TickReport) -> Result<()> {

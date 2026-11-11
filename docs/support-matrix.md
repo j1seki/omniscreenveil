@@ -22,7 +22,7 @@ pretend otherwise.
 | **Windows 10 2004+ / 11** | **native** | **native** | **native** | `WDA_EXCLUDEFROMCAPTURE` must be set in the owning process; `veil_hook_win.dll` provides that. `ShowWindow` for strict hide. |
 | **macOS 13+** | **unsupported** — no public ScreenCaptureKit exclusion API for foreign windows | **native** | **native** | ScreenCaptureKit capture for the Surface; Accessibility `AXHidden` for strict hide. Both need user consent. |
 | **Linux / X11** | **unsupported** — needs a privileged Xorg XACE module | **native** | **native** | Root-window capture + `XGetGeometry` inventory; `XUnmapWindow` strict hide. |
-| **Linux / Wayland** | **unsupported** — compositors do not expose per-window capture exclusion | **partial** — needs a desktop-specific geometry provider; falls back to mirroring one window | **native** | Portal/PipeWire capture. Geometry providers planned for KWin, GNOME Shell and sway/Hyprland. |
+| **Linux / Wayland** | **unsupported** — compositors do not expose per-window capture exclusion | **partial** — sway/Hyprland: wlr-screencopy capture + IPC geometry; GNOME/KDE: portal mirror fallback | **partial** — sway/Hyprland IPC moves the window off-screen; GNOME Shell and KDE Plasma need a desktop extension | Per-window exclusion remains impossible. Capture uses `grim` (wlr-screencopy); no private compositor patches. |
 
 ### Why Exclusion is not universal
 
@@ -49,7 +49,8 @@ pretend otherwise.
 | macOS strict hide | Accessibility `AXHidden` removes the window from the capture and `AXHidden=false` restores it; requires consented permission. |
 | X11 Surface | `crates/veil-protect-linux/tests/x11_end_to_end.rs`: canary present in root capture, removed by `SurfacePlan`, strict hide removes it, remap restores it. |
 | X11 strict hide | Same test, using `XUnmapWindow` / `XMapWindow`. |
-| Wayland Surface | Phase 1: portal capture + geometry provider, same canary harness. Until then the app reports partial and does not claim protection. |
+| Wayland Surface | Phase 1 on sway/Hyprland: `grim` capture + `swaymsg`/`hyprctl` geometry, masked by the Surface, same canary harness. GNOME/KDE report partial until a provider ships. |
+| Wayland strict hide | `crates/veil-protect-wayland` unit tests cover sway/Hyprland inventory parsing and command construction; runtime validation requires a live compositor. |
 | Any platform, missing permission | The verifier returns `Inconclusive`, never `Protected`. |
 
 ## What is deliberately out of scope

@@ -76,18 +76,20 @@ XACE and a modified server).
 **Question:** is there any clean path to per-window exclusion? If not, what is
 the best honest fallback?
 
-**Probe (Phase 1):**
+**Probe (implemented for sway/Hyprland):**
 
-1. Request a ScreenCast session through the portal (GNOME/KDE), receive a
-   PipeWire stream.
-2. Implement one geometry provider first (pick KWin or sway; they are easiest to
-   script).
+1. Capture through `grim` (wlr-screencopy), the same public protocol used by
+   screenshots and OBS on wlroots compositors.
+2. Read geometry from `swaymsg -t get_tree` / `hyprctl clients -j`.
 3. Mask protected rectangles in the captured frame and verify with the same
    canary harness.
-4. If no provider: mirror one window from the stream.
+4. Strict hide moves the window to a private workspace and restores it via the
+   same IPC.
 
-**Conclusion so far:** Exclusion is unsupported; Surface is `partial` until a
-provider ships. This is recorded in the capability matrix and shown in the UI.
+**Conclusion:** Exclusion is impossible without compositor cooperation. The
+Surface and strict hide are **partial**: they work on sway and Hyprland, while
+GNOME Shell and KDE Plasma still need a desktop-specific provider. The matrix
+and UI say exactly that. Anything else falls back to a labelled simulation.
 
 ## What Phase 0 deliberately did not do
 

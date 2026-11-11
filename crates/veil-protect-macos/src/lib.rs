@@ -57,6 +57,21 @@ impl MacBackend {
             Err(MacError::NotMacOs)
         }
     }
+
+    /// Capture the main display through ScreenCaptureKit.
+    ///
+    /// The Swift helper excludes this process's own windows from the filter, so
+    /// the Veil Surface cannot recurse into itself.
+    pub fn capture_root(&self) -> Result<veil_surface::Frame, MacError> {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.capture_display(0)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(MacError::NotMacOs)
+        }
+    }
 }
 
 impl ProtectionBackend for MacBackend {
@@ -130,6 +145,12 @@ mod ffi {
         fn veil_macos_free_string(ptr: *mut c_char);
         fn veil_macos_list_windows_json() -> *mut c_char;
         fn veil_macos_accessibility_trusted() -> i32;
+        fn veil_macos_capture_display(
+            display_id: u32,
+            out_width: *mut u32,
+            out_height: *mut u32,
+        ) -> *mut u8;
+        fn veil_macos_free_buffer(ptr: *mut u8);
     }
 
     #[derive(serde::Deserialize)]
@@ -166,6 +187,22 @@ mod ffi {
 
         pub fn accessibility_trusted(&self) -> bool {
             unsafe { veil_macos_accessibility_trusted() == 1 }
+        }
+
+        /// Capture the display through ScreenCaptureKit and convert the BGRA
+        /// buffer into a `veil_surface::Frame`.
+        pub fn capture_display(&self, display_id: u32) -> Result<veil_surface::Frame, MacError> {
+            let mut width: u32 = 0;
+            let mut height: u32 = 0;
+            let ptr = unsafe { veil_macos_capture_display(display_id, &mut width, &mut height) };
+            if ptr.is_null() {
+                return Err(MacError::Helper(last_error()));
+            }
+            let len = width as usize * height as usize * 4;
+            let bytes = unsafe { std::slice::from_raw_parts(ptr, len).to_vec() };
+            unsafe { veil_macos_free_buffer(ptr) };
+            veil_surface::Frame::from_bytes(width, height, veil_surface::PixelFormat::Bgra8, bytes)
+                .map_err(|err| MacError::Helper(format!("bad ScreenCaptureKit frame: {err}")))
         }
 
         pub fn list_windows(&self) -> Result<Vec<WindowInfo>, MacError> {

@@ -1,9 +1,9 @@
 //! Platform backend selection for the desktop app.
 //!
 //! One enum hides the per-OS differences from the Tauri commands. When no real
-//! backend is available (headless CI, Wayland with nothing implemented yet,
-//! missing permissions) we fall back to the in-memory backend and say so in the
-//! UI instead of pretending protection is live.
+//! backend is available (headless CI, a Wayland compositor without the IPC this
+//! build speaks, missing permissions) we fall back to the in-memory backend and
+//! say so in the UI instead of pretending protection is live.
 
 use veil_core::window::Platform;
 use veil_core::{WindowInfo, WindowId};
@@ -12,6 +12,8 @@ use veil_surface::Frame;
 
 #[cfg(target_os = "linux")]
 use veil_protect_linux::X11Backend;
+#[cfg(target_os = "linux")]
+use veil_protect_wayland::WaylandBackend;
 
 #[cfg(windows)]
 use veil_protect_win::WinBackend;
@@ -31,6 +33,8 @@ pub struct BackendInfo {
 pub enum DesktopBackend {
     #[cfg(target_os = "linux")]
     X11(X11Backend),
+    #[cfg(target_os = "linux")]
+    Wayland(WaylandBackend),
     #[cfg(windows)]
     Windows(WinBackend),
     #[cfg(target_os = "macos")]
@@ -73,16 +77,35 @@ impl DesktopBackend {
                     }
                 }
             }
-            return (
-                Self::Simulated(MemoryBackend::new(Platform::LinuxWayland)),
-                BackendInfo {
-                    platform: Platform::LinuxWayland,
-                    name: "Simulated (Wayland)".into(),
-                    live: false,
-                    note: "Wayland session: the portal/PipeWire Veil Surface pipeline is not wired into this build. Use strict hide or the CLI; protected windows are simulated here."
-                        .into(),
-                },
-            );
+            match WaylandBackend::new() {
+                Ok(backend) => {
+                    let compositor = backend.compositor().label();
+                    return (
+                        Self::Wayland(backend),
+                        BackendInfo {
+                            platform: Platform::LinuxWayland,
+                            name: format!("Wayland ({compositor})"),
+                            live: true,
+                            note: format!(
+                                "Live {compositor} session. The Surface captures through grim/wlr-screencopy and masks protected windows; strict hide moves them to a private workspace via compositor IPC."
+                            ),
+                        },
+                    );
+                }
+                Err(err) => {
+                    return (
+                        Self::Simulated(MemoryBackend::new(Platform::LinuxWayland)),
+                        BackendInfo {
+                            platform: Platform::LinuxWayland,
+                            name: "Simulated (Wayland)".into(),
+                            live: false,
+                            note: format!(
+                                "Wayland backend unavailable ({err}). Only sway and Hyprland expose the public IPC this build uses; GNOME/KDE need a compositor extension. Protected windows are simulated here."
+                            ),
+                        },
+                    );
+                }
+            }
         }
 
         #[cfg(windows)]
@@ -163,6 +186,10 @@ impl DesktopBackend {
             Self::X11(backend) => backend
                 .list_windows()
                 .map_err(|err| format!("X11 inventory failed: {err}")),
+            #[cfg(target_os = "linux")]
+            Self::Wayland(backend) => backend
+                .list_windows()
+                .map_err(|err| format!("Wayland inventory failed: {err}")),
             #[cfg(windows)]
             Self::Windows(backend) => backend
                 .list_windows()
@@ -179,17 +206,36 @@ impl DesktopBackend {
     pub fn capture_frame(&self) -> Option<Frame> {
         match self {
             #[cfg(target_os = "linux")]
-            Self::X11(backend) => backend.platform().capture_root().ok(),
+            Self::X11(backend) => backend.platform().capture_surface().ok(),
+            #[cfg(target_os = "linux")]
+            Self::Wayland(backend) => backend.capture_root().ok(),
+            #[cfg(target_os = "macos")]
+            Self::Mac(backend) => backend.capture_root().ok(),
             _ => None,
         }
     }
 
-    /// Bounds of the app's own window, so the surface never composites itself.
-    pub fn own_window(&self) -> Option<veil_core::Rect> {
+    /// Whether the backend's capture includes its own windows. X11 composites
+    /// foreign windows only, and macOS excludes them in ScreenCaptureKit, so
+    /// only the Wayland screencopy path needs the extra mask.
+    pub fn capture_includes_own_windows(&self) -> bool {
         match self {
             #[cfg(target_os = "linux")]
-            Self::X11(backend) => backend.own_window_bounds(),
-            _ => None,
+            Self::X11(backend) => !backend.platform().has_compositor(),
+            #[cfg(target_os = "linux")]
+            Self::Wayland(_) => true,
+            _ => false,
+        }
+    }
+
+    /// Bounds of every app-owned window, so the surface never composites itself.
+    pub fn own_windows(&self) -> Vec<veil_core::Rect> {
+        match self {
+            #[cfg(target_os = "linux")]
+            Self::X11(backend) => backend.own_windows(),
+            #[cfg(target_os = "linux")]
+            Self::Wayland(backend) => backend.own_windows(),
+            _ => Vec::new(),
         }
     }
 }
@@ -199,6 +245,8 @@ impl ProtectionBackend for DesktopBackend {
         match self {
             #[cfg(target_os = "linux")]
             Self::X11(backend) => ProtectionBackend::platform(backend),
+            #[cfg(target_os = "linux")]
+            Self::Wayland(backend) => ProtectionBackend::platform(backend),
             #[cfg(windows)]
             Self::Windows(backend) => backend.platform(),
             #[cfg(target_os = "macos")]
@@ -211,6 +259,8 @@ impl ProtectionBackend for DesktopBackend {
         match self {
             #[cfg(target_os = "linux")]
             Self::X11(backend) => backend.apply(intent),
+            #[cfg(target_os = "linux")]
+            Self::Wayland(backend) => backend.apply(intent),
             #[cfg(windows)]
             Self::Windows(backend) => backend.apply(intent),
             #[cfg(target_os = "macos")]
@@ -223,6 +273,8 @@ impl ProtectionBackend for DesktopBackend {
         match self {
             #[cfg(target_os = "linux")]
             Self::X11(backend) => backend.release(window),
+            #[cfg(target_os = "linux")]
+            Self::Wayland(backend) => backend.release(window),
             #[cfg(windows)]
             Self::Windows(backend) => backend.release(window),
             #[cfg(target_os = "macos")]
@@ -235,6 +287,8 @@ impl ProtectionBackend for DesktopBackend {
         match self {
             #[cfg(target_os = "linux")]
             Self::X11(_) => "X11 backend".into(),
+            #[cfg(target_os = "linux")]
+            Self::Wayland(backend) => backend.describe(),
             #[cfg(windows)]
             Self::Windows(_) => "Windows backend".into(),
             #[cfg(target_os = "macos")]

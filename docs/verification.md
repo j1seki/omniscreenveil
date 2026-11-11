@@ -98,10 +98,33 @@ cd platform/macos && swift build -c release && swift test
 
 ### Wayland
 
-1. Run a portal/PipeWire capture and a geometry provider for the compositor.
-2. Confirm the Surface masks protected rectangles.
-3. If no provider is available, confirm the UI says partial and falls back to
-   single-window mirroring. Do not report `Protected`.
+The sway/Hyprland backend is implemented in `crates/veil-protect-wayland`.
+It has no live compositor to test against in this repository's headless VM, so
+runtime validation is explicitly listed as unverified. Unit tests cover the
+parts that can be checked deterministically:
+
+```sh
+cargo test -p veil-protect-wayland
+```
+
+- sway tree → window inventory (absolute geometry, workspace, own-process
+  filtering),
+- Hyprland client JSON → inventory (address round-trip, workspace, hidden
+  state),
+- PPM parser used for `grim` frames, including pixel bytes that look like
+  whitespace and truncated payloads.
+
+On a real sway or Hyprland session:
+
+```sh
+cargo run -p veil-cli -- list
+cargo run -p veil-cli -- surface --live --protect <window-id> --out veil.ppm
+cargo run -p veil-cli -- protect <window-id> --mode strict-hide
+cargo run -p veil-cli -- release <window-id>
+```
+
+Confirm the Surface masks protected rectangles and strict hide removes the
+window from `grim` output. GNOME/KDE must report partial, not protected.
 
 ## Evidence from this repository
 
@@ -113,8 +136,9 @@ Environment: headless aarch64 Debian 13 VM, Rust workspace, `Xvfb` available.
 veil-canary           10 passed
 veil-cli               3 passed
 veil-core             27 passed
-veil-protect           9 passed
+veil-protect         9 passed
 veil-protect-linux     1 passed  (x11_end_to_end, real Xvfb pixels)
+veil-protect-wayland   9 passed  (sway/Hyprland JSON + PPM parsing)
 veil-protect-win       3 passed  (compile-gated unit checks)
 veil-surface          11 passed
 veil-verify            5 passed
@@ -127,12 +151,19 @@ Frontend: `pnpm build` (tsc + Vite) succeeds. Tauri Rust: `cargo build` succeeds
 against `libwebkit2gtk-4.1`.
 
 Visual evidence: the screenshots in `docs/images/` were captured from the
-running app under Xvfb with a live X11 backend. They are not mockups. The
-preview is a real root-window capture composited by `veil-surface`.
+running app under Xvfb + `xcompmgr` with a live X11 backend. They are not
+mockups. The preview and the dedicated `OmniScreenVeil Surface` window are
+real XComposite window captures composited by `veil-surface`: our own windows
+are excluded from the composite, the foreign `xmessage` window is visible when
+disarmed, and its rectangle is replaced with the checker veil once armed.
 
 ![OmniScreenVeil under X11, protection armed](images/app-x11-protected.png)
 
-![OmniScreenVeil under X11, idle](images/app-x11.png)
+![OmniScreenVeil under X11, disarmed — live window visible in preview](images/app-x11.png)
+
+![Dedicated shareable Surface window, disarmed](images/surface-x11-live.png)
+
+![Dedicated shareable Surface window, armed — protected window masked](images/surface-x11-masked.png)
 
 ## Reproducing the headless UI check
 
