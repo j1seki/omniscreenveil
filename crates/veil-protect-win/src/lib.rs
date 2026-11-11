@@ -122,18 +122,16 @@ pub fn normalize_exe(path: &str) -> String {
 #[cfg(windows)]
 mod win {
     use super::*;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
     use std::path::PathBuf;
 
     use windows_sys::Win32::Foundation::{
-        CloseHandle, GetLastError, BOOL, FALSE, HANDLE, HWND, LPARAM, TRUE, WAIT_OBJECT_0,
+        CloseHandle, GetLastError, BOOL, HANDLE, HWND, LPARAM, RECT, TRUE, WAIT_OBJECT_0,
     };
     use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
-    use windows_sys::Win32::System::LibraryLoader::{
-        GetModuleHandleW, GetProcAddress, LoadLibraryW,
-    };
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows_sys::Win32::System::Memory::{
         VirtualAllocEx, VirtualFreeEx, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
     };
@@ -144,10 +142,9 @@ mod win {
         PROCESS_VM_WRITE,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetPropW, GetWindowLongW, GetWindowRect, GetWindowTextW,
-        GetWindowThreadProcessId, IsIconic, IsWindowVisible, RemovePropW, SetPropW,
-        SetWindowDisplayAffinity, ShowWindow, GWL_EXSTYLE, SW_HIDE, SW_SHOW,
-        WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WS_EX_TOOLWINDOW,
+        EnumWindows, GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
+        IsIconic, IsWindowVisible, RemovePropW, SetPropW, ShowWindow, GWL_EXSTYLE, SW_HIDE,
+        SW_SHOW, WS_EX_TOOLWINDOW,
     };
 
     use veil_core::geometry::Rect;
@@ -187,7 +184,12 @@ mod win {
         if pid == 0 || pid == GetCurrentProcessId() {
             return TRUE;
         }
-        let mut rect = Default::default();
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
         if GetWindowRect(hwnd, &mut rect) == 0 {
             return TRUE;
         }
