@@ -1,0 +1,41 @@
+[package]
+name = "omniscreenveil-desktop"
+description = "OmniScreenVeil desktop app (Tauri 2 + React)."
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "GPL-3.0-or-later"
+
+[lib]
+name = "omni_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+png = "0.17"
+veil-core = { path = "../../../crates/veil-core" }
+veil-surface = { path = "../../../crates/veil-surface" }
+veil-canary = { path = "../../../crates/veil-canary" }
+veil-protect = { path = "../../../crates/veil-protect" }
+veil-verify = { path = "../../../crates/veil-verify" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+veil-protect-linux = { path = "../../../crates/veil-protect-linux" }
+
+[target.'cfg(windows)'.dependencies]
+veil-protect-win = { path = "../../../crates/veil-protect-win" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+veil-protect-macos = { path = "../../../crates/veil-protect-macos" }
+
+# Independent workspace: the app is built on the user's machine against the
+# installed webview, and must not make `cargo test --workspace` at the repo
+# root depend on GTK/WebKit being present.
+[workspace]

@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/veil-core",
+    "crates/veil-surface",
+    "crates/veil-canary",
+    "crates/veil-protect",
+    "crates/veil-verify",
+    "crates/veil-protect-linux",
+    "crates/veil-protect-win",
+    "crates/veil-protect-macos",
+    "crates/veil-hook-win",
+    "apps/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "GPL-3.0-or-later"
+authors = ["OmniScreenVeil contributors"]
+
+[workspace.dependencies]
+veil-core = { path = "crates/veil-core" }
+veil-surface = { path = "crates/veil-surface" }
+veil-canary = { path = "crates/veil-canary" }
+veil-protect = { path = "crates/veil-protect" }
+veil-verify = { path = "crates/veil-verify" }
+veil-protect-linux = { path = "crates/veil-protect-linux" }
+veil-protect-win = { path = "crates/veil-protect-win" }
+veil-protect-macos = { path = "crates/veil-protect-macos" }
+veil-hook-win = { path = "crates/veil-hook-win" }
+
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "randr", "xfixes"] }
+
+[profile.release]
+lto = "thin"
+strip = "symbols"

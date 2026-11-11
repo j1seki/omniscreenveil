@@ -1,0 +1,25 @@
+[package]
+name = "veil-protect-win"
+description = "Windows backend: window inventory, DLL injection, display affinity and strict hide."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+veil-core.workspace = true
+veil-protect.workspace = true
+veil-surface.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_System_Memory",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+] }

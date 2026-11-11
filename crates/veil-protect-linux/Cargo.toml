@@ -1,0 +1,21 @@
+[package]
+name = "veil-protect-linux"
+description = "X11 backend: window inventory, strict hide and pixel capture for the Veil Surface."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+veil-core.workspace = true
+veil-protect.workspace = true
+veil-surface.workspace = true
+veil-verify.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+x11rb.workspace = true
+
+[dev-dependencies]
+veil-canary.workspace = true

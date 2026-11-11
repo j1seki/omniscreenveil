@@ -1,0 +1,12 @@
+[package]
+name = "veil-surface"
+description = "Software compositor that renders the Veil Surface: desktop minus protected windows."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+veil-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true

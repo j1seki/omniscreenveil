@@ -1,0 +1,14 @@
+[package]
+name = "veil-verify"
+description = "Capture-verification harness: prove with pixels that protected content is gone."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+veil-core.workspace = true
+veil-surface.workspace = true
+veil-canary.workspace = true
+thiserror.workspace = true
+serde.workspace = true

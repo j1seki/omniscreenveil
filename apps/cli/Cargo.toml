@@ -1,0 +1,28 @@
+[package]
+name = "veil-cli"
+description = "OmniScreenVeil command-line agent: inventory, protection and self-test."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "veil"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+png = "0.17"
+veil-core.workspace = true
+veil-surface.workspace = true
+veil-canary.workspace = true
+veil-protect.workspace = true
+veil-verify.workspace = true
+veil-protect-win.workspace = true
+veil-protect-macos.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+veil-protect-linux.workspace = true

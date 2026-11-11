@@ -1,0 +1,18 @@
+[package]
+name = "veil-hook-win"
+description = "Injected helper: applies WDA_EXCLUDEFROMCAPTURE to the host process's protected windows."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }

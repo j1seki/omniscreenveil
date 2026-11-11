@@ -1,0 +1,15 @@
+[package]
+name = "veil-protect-macos"
+description = "macOS backend: AppKit/Accessibility helpers and the ScreenCaptureKit surface."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+veil-core.workspace = true
+veil-protect.workspace = true
+veil-surface.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true

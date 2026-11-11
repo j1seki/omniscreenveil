@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # X11 headers are only needed to compile the Linux backend.
+      - name: Linux webview + X11 dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev libssl-dev pkg-config libx11-dev
+      - name: Swift static library (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd platform/macos
+          swift build -c release
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+        env:
+          # The macOS crate links the Swift library built above.
+          VEIL_MACOS_STATIC_LIB: ${{ github.workspace }}/platform/macos/.build/release/libVeilMac.a
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux X11 test dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libx11-dev
+      - name: Swift static library (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd platform/macos
+          swift build -c release
+          swift test
+      - name: cargo test
+        run: cargo test --workspace
+        env:
+          VEIL_MACOS_STATIC_LIB: ${{ github.workspace }}/platform/macos/.build/release/libVeilMac.a
+
+  desktop:
+    name: desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+      - name: Linux webview dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev libssl-dev pkg-config
+      - name: Swift static library (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd platform/macos
+          swift build -c release
+      - name: Frontend
+        working-directory: apps/desktop
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+      - name: Tauri Rust check
+        working-directory: apps/desktop/src-tauri
+        run: cargo check
+        env:
+          VEIL_MACOS_STATIC_LIB: ${{ github.workspace }}/platform/macos/.build/release/libVeilMac.a
