@@ -58,6 +58,17 @@ impl MacBackend {
         }
     }
 
+    pub fn accessibility_trusted(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.accessibility_trusted()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
+    }
+
     /// Capture the main display through ScreenCaptureKit.
     ///
     /// The Swift helper excludes this process's own windows from the filter, so
