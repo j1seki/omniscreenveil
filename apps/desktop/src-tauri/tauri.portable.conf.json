@@ -1,0 +1,12 @@
+{
+  "app": {
+    "appDirectoriesOverride": "./app-data"
+  },
+  "bundle": {
+    "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller"
+      }
+    }
+  }
+}

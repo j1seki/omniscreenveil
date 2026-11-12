@@ -10,6 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "appDirectoriesOverride": "./app-data",
     "windows": [
       {
         "label": "main",
@@ -28,7 +29,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["appimage", "deb", "nsis", "zip", "dmg"],
     "category": "Utility",
     "shortDescription": "Selective screen-capture privacy",
     "longDescription": "Protect selected windows from screen capture. The Veil Surface masks protected windows in a shareable window on every platform; Windows additionally verifies OS-level capture exclusion.",
@@ -42,6 +43,19 @@
     "linux": {
       "deb": {
         "depends": ["libwebkit2gtk-4.1-0", "libayatana-appindicator3-1"]
+      },
+      "appimage": {
+        "bundleMediaFramework": true
+      }
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["English"],
+        "displayLanguageSelector": false
       }
     }
   }
