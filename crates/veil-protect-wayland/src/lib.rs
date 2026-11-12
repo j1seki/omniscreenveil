@@ -418,6 +418,7 @@ fn walk_sway(
                 minimized: !visible,
                 top_level: true,
                 platform: Platform::LinuxWayland,
+                icon: String::new(),
             });
             out.tracks.insert(
                 id,
@@ -518,6 +519,7 @@ fn parse_hyprland_clients(json: &str, own_pid: u32) -> Result<Inventory, Wayland
             minimized: !mapped || hidden,
             top_level: true,
             platform: Platform::LinuxWayland,
+            icon: String::new(),
         });
         inventory.tracks.insert(
             id,

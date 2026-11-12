@@ -28,7 +28,27 @@ export function ShieldMark({ size = 22, className }: { size?: number; className?
   );
 }
 
-export function AppGlyph({ name, size = 18 }: { name: string; size?: number }) {
+export function AppGlyph({
+  name,
+  icon,
+  size = 18,
+}: {
+  name: string;
+  icon?: string;
+  size?: number;
+}) {
+  if (icon) {
+    return (
+      <img
+        src={`data:image/png;base64,${icon}`}
+        alt=""
+        width={size}
+        height={size}
+        className="shrink-0 rounded-[4px] object-contain"
+        draggable={false}
+      />
+    );
+  }
   const initial = (name.trim()[0] ?? "?").toUpperCase();
   let hash = 0;
   for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) % 360;

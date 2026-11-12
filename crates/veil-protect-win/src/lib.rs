@@ -130,6 +130,10 @@ mod win {
     use windows_sys::Win32::Foundation::{
         CloseHandle, GetLastError, BOOL, HANDLE, HWND, LPARAM, RECT, TRUE, WAIT_OBJECT_0,
     };
+    use windows_sys::Win32::Graphics::Gdi::{
+        BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, GetObjectW,
+        ReleaseDC, SelectObject, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, SRCCOPY,
+    };
     use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
     use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows_sys::Win32::System::Memory::{
@@ -141,10 +145,11 @@ mod win {
         PROCESS_CREATE_THREAD, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_OPERATION,
         PROCESS_VM_WRITE,
     };
+    use windows_sys::Win32::UI::Shell::ExtractAssociatedIconW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
-        IsIconic, IsWindowVisible, RemovePropW, SetPropW, ShowWindow, GWL_EXSTYLE, SW_HIDE,
-        SW_SHOW, WS_EX_TOOLWINDOW,
+        DestroyIcon, EnumWindows, GetIconInfo, GetWindowLongW, GetWindowRect, GetWindowTextW,
+        GetWindowThreadProcessId, IsIconic, IsWindowVisible, RemovePropW, SetPropW, ShowWindow,
+        GWL_EXSTYLE, HICON, ICONINFO, SW_HIDE, SW_SHOW, WS_EX_TOOLWINDOW,
     };
 
     use veil_core::geometry::Rect;
@@ -216,6 +221,34 @@ mod win {
         TRUE
     }
 
+    /// Encode a BGRA pixel buffer as a base64 PNG.
+    fn bgra_to_png_base64(pixels: &[u8], w: u32, h: u32) -> Option<String> {
+        let mut buf = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut buf, w, h);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().ok()?;
+            // PNG is RGBA; the source is BGRA, so swap the colour channels.
+            let mut rgba = Vec::with_capacity(pixels.len());
+            for px in pixels.chunks_exact(4) {
+                rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+            }
+            writer.write_image_data(&rgba).ok()?;
+        }
+        use base64::Engine;
+        Some(base64::engine::general_purpose::STANDARD.encode(buf))
+    }
+
+    /// Extract the app icon for an executable as a base64 PNG, or empty when
+    /// the OS cannot provide one.
+    fn app_icon(path: &str) -> String {
+        match exe_icon(path).and_then(|(pixels, w, h)| bgra_to_png_base64(&pixels, w, h)) {
+            Some(png) => png,
+            None => String::new(),
+        }
+    }
+
     fn process_image(pid: u32) -> Option<String> {
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
@@ -232,6 +265,128 @@ mod win {
             let os = OsString::from_wide(&buf[..len as usize]);
             Some(os.to_string_lossy().into_owned())
         }
+    }
+
+    /// Extract the first icon from an executable as a 32-bit BGRA buffer plus
+    /// its dimensions. `ExtractAssociatedIconW` returns the small icon, which
+    /// is what a window list should show.
+    fn exe_icon(path: &str) -> Option<(Vec<u8>, u32, u32)> {
+        unsafe {
+            let mut wide = wide(path);
+            let mut index = 0u16;
+            let icon = ExtractAssociatedIconW(std::ptr::null_mut(), wide.as_mut_ptr(), &mut index);
+            if icon.is_null() {
+                return None;
+            }
+            let (pixels, w, h) = icon_to_bgra(icon)?;
+            DestroyIcon(icon);
+            Some((pixels, w, h))
+        }
+    }
+
+    /// Read an icon handle into a 32-bit BGRA pixel buffer. The caller owns
+    /// `info.hbmMask` / `info.hbmColor` and must delete them.
+    unsafe fn icon_to_bgra(icon: HICON) -> Option<(Vec<u8>, u32, u32)> {
+        let mut info = ICONINFO {
+            fIcon: 0,
+            xHotspot: 0,
+            yHotspot: 0,
+            hbmMask: std::ptr::null_mut(),
+            hbmColor: std::ptr::null_mut(),
+        };
+        if GetIconInfo(icon, &mut info) == 0 {
+            return None;
+        }
+
+        let result = (|| {
+            let bitmap = info.hbmColor;
+            let mut bmp: BITMAP = std::mem::zeroed();
+            if GetObjectW(
+                bitmap as *mut _,
+                std::mem::size_of::<BITMAP>() as i32,
+                &mut bmp as *mut _ as *mut _,
+            ) == 0
+            {
+                return None;
+            }
+            let w = bmp.bmWidth;
+            let h = bmp.bmHeight;
+            if w <= 0 || h <= 0 {
+                return None;
+            }
+
+            let screen = GetDC(std::ptr::null_mut());
+            if screen.is_null() {
+                return None;
+            }
+            let dc = CreateCompatibleDC(screen);
+            let icon_dc = CreateCompatibleDC(screen);
+            ReleaseDC(std::ptr::null_mut(), screen);
+            if dc.is_null() || icon_dc.is_null() {
+                if !dc.is_null() {
+                    DeleteDC(dc);
+                }
+                if !icon_dc.is_null() {
+                    DeleteDC(icon_dc);
+                }
+                return None;
+            }
+
+            // A DIB section gives us directly addressable 32-bit pixels.
+            let header = BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: 0,
+                biSizeImage: 0,
+                biXPelsPerMeter: 0,
+                biYPelsPerMeter: 0,
+                biClrUsed: 0,
+                biClrImportant: 0,
+            };
+            let bmi = BITMAPINFO {
+                bmiHeader: header,
+                bmiColors: [std::mem::zeroed(); 1],
+            };
+            let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+            let dib =
+                CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+            if dib.is_null() || bits.is_null() {
+                DeleteDC(dc);
+                DeleteDC(icon_dc);
+                return None;
+            }
+
+            // Select the icon's colour bitmap, then blit it into the DIB.
+            let old_icon = SelectObject(icon_dc, bitmap as *mut _);
+            let old_dib = SelectObject(dc, dib as *mut _);
+            let ok = BitBlt(dc, 0, 0, w, h, icon_dc, 0, 0, SRCCOPY);
+            SelectObject(dc, old_dib);
+            SelectObject(icon_dc, old_icon);
+            DeleteDC(dc);
+            DeleteDC(icon_dc);
+
+            if ok == 0 {
+                DeleteObject(dib as *mut _);
+                return None;
+            }
+
+            let row = (w as usize) * 4;
+            let mut pixels = vec![0u8; row * h as usize];
+            std::ptr::copy_nonoverlapping(bits as *const u8, pixels.as_mut_ptr(), pixels.len());
+            DeleteObject(dib as *mut _);
+            Some((pixels, w as u32, h as u32))
+        })();
+
+        if !info.hbmMask.is_null() {
+            DeleteObject(info.hbmMask as *mut _);
+        }
+        if !info.hbmColor.is_null() {
+            DeleteObject(info.hbmColor as *mut _);
+        }
+        result
     }
 
     pub struct Inner {
@@ -254,6 +409,7 @@ mod win {
                 EnumWindows(Some(enum_cb), &mut raw as *mut _ as LPARAM);
             }
             let mut exe_cache: BTreeMap<u32, String> = BTreeMap::new();
+            let mut icon_cache: BTreeMap<u32, String> = BTreeMap::new();
             let mut out = Vec::with_capacity(raw.len());
             for window in raw {
                 let exe = exe_cache
@@ -263,6 +419,10 @@ mod win {
                 if exe.is_empty() {
                     continue;
                 }
+                let icon = icon_cache
+                    .entry(window.pid)
+                    .or_insert_with(|| app_icon(&exe))
+                    .clone();
                 let app_name = exe
                     .rsplit(['\\', '/'])
                     .next()
@@ -281,6 +441,7 @@ mod win {
                     minimized: window.minimized,
                     top_level: true,
                     platform: Platform::Windows,
+                    icon,
                 });
             }
             Ok(out)

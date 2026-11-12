@@ -68,6 +68,10 @@ pub struct WindowInfo {
     pub minimized: bool,
     pub top_level: bool,
     pub platform: Platform,
+    /// Base64-encoded PNG of the owning app's icon, when the platform can
+    /// provide one. Empty string means "no icon available".
+    #[serde(default)]
+    pub icon: String,
 }
 
 impl WindowInfo {

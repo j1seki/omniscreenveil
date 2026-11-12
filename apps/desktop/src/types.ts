@@ -39,6 +39,8 @@ export interface WindowInfo {
   minimized: boolean;
   top_level: boolean;
   platform: Platform;
+  /** Base64 PNG of the owning app's icon; empty when unavailable. */
+  icon?: string;
 }
 
 export type TargetRef =

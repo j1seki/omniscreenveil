@@ -27,6 +27,7 @@ pub fn window(id: u64, app_key: &str, title: &str, bounds: Rect) -> WindowInfo {
         minimized: false,
         top_level: true,
         platform: Platform::LinuxX11,
+        icon: String::new(),
     }
 }
 

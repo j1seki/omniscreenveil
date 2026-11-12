@@ -275,6 +275,7 @@ impl X11Platform {
             minimized: attrs.map_state != MapState::VIEWABLE,
             top_level: true,
             platform: Platform::LinuxX11,
+            icon: String::new(),
         }))
     }
 

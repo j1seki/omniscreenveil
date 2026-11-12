@@ -235,6 +235,7 @@ mod ffi {
                     minimized: false,
                     top_level: true,
                     platform: Platform::MacOs,
+                    icon: String::new(),
                 })
                 .collect())
         }

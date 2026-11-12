@@ -30,6 +30,31 @@ function preferredMode(caps: Capabilities | null): ProtectionMode {
   return "strict_hide";
 }
 
+function WindowStateBadge({ window }: { window: WindowInfo }) {
+  if (!window.visible) {
+    return (
+      <Badge variant="sim" className="gap-1">
+        <span className="size-1.5 rounded-full bg-warn" />
+        hidden from desktop
+      </Badge>
+    );
+  }
+  if (window.minimized) {
+    return (
+      <Badge variant="default" className="gap-1">
+        <span className="size-1.5 rounded-full bg-ink-faint" />
+        minimized
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="default" className="gap-1">
+      <span className="size-1.5 rounded-full bg-good" />
+      visible
+    </Badge>
+  );
+}
+
 function WindowRow({
   window,
   enabled,
@@ -56,7 +81,7 @@ function WindowRow({
         enabled ? "border-accent/20 bg-accent/[0.06]" : "hover:bg-row",
       )}
     >
-      <AppGlyph name={window.app_name} />
+      <AppGlyph name={window.app_name} icon={window.icon} />
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-2">
           <span className="truncate text-[13px] font-medium text-ink">{window.app_name}</span>
@@ -70,8 +95,7 @@ function WindowRow({
             <Monitor className="size-3" />
             {window.bounds.w}×{window.bounds.h}
           </span>
-          {!window.visible && <Badge variant="default">hidden</Badge>}
-          {window.minimized && <Badge variant="default">minimized</Badge>}
+          <WindowStateBadge window={window} />
         </div>
       </div>
 
@@ -147,7 +171,7 @@ function AppGroup({
         <ChevronDown
           className={cn("size-4 text-ink-faint transition-transform", !open && "-rotate-90")}
         />
-        <AppGlyph name={appName} size={20} />
+        <AppGlyph name={appName} icon={windows[0]?.icon} size={20} />
         <span className="flex-1 truncate text-[13px] font-semibold text-ink">{appName}</span>
         <span className="text-[11px] text-ink-faint">
           {windows.length} window{windows.length === 1 ? "" : "s"}
