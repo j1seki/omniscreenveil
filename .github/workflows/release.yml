@@ -84,7 +84,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $exe = Get-ChildItem -Recurse -Filter "OmniScreenVeil.exe" target/${{ matrix.target }}/release -ErrorAction SilentlyContinue | Select-Object -First 1
+          $exe = Get-ChildItem -Recurse -Filter "*.exe" target/${{ matrix.target }}/release -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\bundle\\' } | Select-Object -First 1
           if (-not $exe) { throw "built exe not found" }
           $stage = "target/${{ matrix.target }}/release/portable"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
