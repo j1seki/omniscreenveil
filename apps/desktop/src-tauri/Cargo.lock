@@ -3964,6 +3964,8 @@ dependencies = [
 name = "veil-protect-win"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "png 0.17.16",
  "thiserror 2.0.21",
  "veil-core",
  "veil-protect",

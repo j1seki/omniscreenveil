@@ -29,7 +29,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["appimage", "deb", "nsis", "zip", "dmg"],
+    "targets": ["appimage", "deb", "nsis", "dmg"],
     "category": "Utility",
     "shortDescription": "Selective screen-capture privacy",
     "longDescription": "Protect selected windows from screen capture. The Veil Surface masks protected windows in a shareable window on every platform; Windows additionally verifies OS-level capture exclusion.",
