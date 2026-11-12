@@ -98,7 +98,9 @@ jobs:
         with:
           name: bundle-${{ matrix.target }}
           path: |
-            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.AppImage
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.dmg
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.exe
             apps/desktop/src-tauri/target/${{ matrix.target }}/release/*.zip
 
   release:
