@@ -185,6 +185,10 @@ mod ffi {
             check(unsafe { veil_macos_show_window(window.0) })
         }
 
+        /// Whether the process has Accessibility permission, which strict
+        /// hide requires. Exposed to the UI so it can tell the user to grant it
+        /// instead of failing silently.
+        #[allow(dead_code)]
         pub fn accessibility_trusted(&self) -> bool {
             unsafe { veil_macos_accessibility_trusted() == 1 }
         }

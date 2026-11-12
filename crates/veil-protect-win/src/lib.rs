@@ -243,10 +243,9 @@ mod win {
     /// Extract the app icon for an executable as a base64 PNG, or empty when
     /// the OS cannot provide one.
     fn app_icon(path: &str) -> String {
-        match exe_icon(path).and_then(|(pixels, w, h)| bgra_to_png_base64(&pixels, w, h)) {
-            Some(png) => png,
-            None => String::new(),
-        }
+        exe_icon(path)
+            .and_then(|(pixels, w, h)| bgra_to_png_base64(&pixels, w, h))
+            .unwrap_or_default()
     }
 
     fn process_image(pid: u32) -> Option<String> {
