@@ -84,11 +84,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $exe = Get-ChildItem -Recurse -Filter "*.exe" target/${{ matrix.target }}/release -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\bundle\\' } | Select-Object -First 1
-          if (-not $exe) { throw "built exe not found" }
+          $exe = "target/${{ matrix.target }}/release/omniscreenveil-desktop.exe"
+          if (-not (Test-Path $exe)) { throw "built exe not found at $exe" }
           $stage = "target/${{ matrix.target }}/release/portable"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item $exe.FullName $stage
+          Copy-Item $exe $stage
           Compress-Archive -Path "$stage/*" -DestinationPath "target/${{ matrix.target }}/release/OmniScreenVeil-portable-windows-x64.zip" -Force
           Write-Host "portable zip created"
 
