@@ -83,6 +83,7 @@ jobs:
       - name: Zip portable Windows build
         if: runner.os == 'Windows'
         shell: pwsh
+        working-directory: apps/desktop/src-tauri
         run: |
           $exe = "target/${{ matrix.target }}/release/omniscreenveil-desktop.exe"
           if (-not (Test-Path $exe)) { throw "built exe not found at $exe" }
