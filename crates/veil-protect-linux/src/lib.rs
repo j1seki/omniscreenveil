@@ -5,10 +5,10 @@
 //! Surface is fully functional here. True capture exclusion would require an
 //! Xorg XACE module and is deliberately not implemented.
 //!
-//! The whole crate is Unix-only; on Windows it compiles to an empty library so
-//! the workspace still builds, and the CLI gates every call site.
+//! The whole crate is Linux-only; on other platforms it compiles to an empty
+//! library so the workspace still builds, and the CLI gates every call site.
 
-#![cfg(unix)]
+#![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
