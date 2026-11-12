@@ -1,4 +1,4 @@
-#![cfg(unix)]
+#![cfg(target_os = "linux")]
 
 //! End-to-end X11 test against a real (virtual) X server.
 //!

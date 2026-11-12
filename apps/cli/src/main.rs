@@ -17,7 +17,7 @@ use veil_core::capability::ProtectionMode;
 use veil_core::ids::{AppKey, WindowId};
 use veil_core::testutil::demo_windows;
 use veil_core::{Platform, PlatformCapabilities, Profile, Size, VerifyOutcome};
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use veil_protect::TickReport;
 use veil_protect::{Engine, MemoryBackend};
 use veil_verify::{SyntheticCapture, SyntheticDesktop, VerificationHarness};
@@ -383,7 +383,7 @@ fn cmd_list(json: bool) -> Result<i32> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn list_x11(json: bool) -> Result<i32> {
     let platform = veil_protect_linux::X11Platform::connect()
         .context("cannot connect to X11 (is DISPLAY set?)")?;
@@ -414,7 +414,7 @@ fn list_x11(_json: bool) -> Result<i32> {
     bail!("X11 inventory is only available on Unix hosts")
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn list_wayland(json: bool) -> Result<i32> {
     let backend = veil_protect_wayland::WaylandBackend::new()?;
     let windows = backend.list_windows()?;
@@ -448,7 +448,7 @@ fn list_wayland(_json: bool) -> Result<i32> {
     bail!("Wayland inventory is only available on Unix hosts")
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn x11_plan_and_capture(
     ids: &[WindowId],
 ) -> Result<(veil_surface::SurfacePlan, veil_surface::Frame)> {
@@ -482,7 +482,7 @@ fn x11_plan_and_capture(
     bail!("--live requires an X11 display and a Unix host")
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn wayland_plan_and_capture(
     ids: &[WindowId],
 ) -> Result<(veil_surface::SurfacePlan, veil_surface::Frame)> {
@@ -698,7 +698,7 @@ fn cmd_release(json: bool, window: &str) -> Result<i32> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn x11_protect(json: bool, id: WindowId, mode: ProtectionMode) -> Result<i32> {
     let backend = veil_protect_linux::X11Backend::connect()?;
     let windows = backend.list_windows()?;
@@ -718,7 +718,7 @@ fn x11_protect(_json: bool, _id: WindowId, _mode: ProtectionMode) -> Result<i32>
     bail!("X11 backend is not available on this host")
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn x11_release(json: bool, id: WindowId) -> Result<i32> {
     let platform = veil_protect_linux::X11Platform::connect()?;
     platform.set_mapped(id, true)?;
@@ -738,7 +738,7 @@ fn x11_release(_json: bool, _id: WindowId) -> Result<i32> {
     bail!("X11 backend is not available on this host")
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn wayland_protect(json: bool, id: WindowId, mode: ProtectionMode) -> Result<i32> {
     let backend = veil_protect_wayland::WaylandBackend::new()?;
     let windows = backend.list_windows()?;
@@ -758,7 +758,7 @@ fn wayland_protect(_json: bool, _id: WindowId, _mode: ProtectionMode) -> Result<
     bail!("Wayland backend is not available on this host")
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn wayland_release(json: bool, id: WindowId) -> Result<i32> {
     let mut backend = veil_protect_wayland::WaylandBackend::new()?;
     // Populate workspace tracks so a strict-hidden window returns to its
@@ -784,7 +784,7 @@ fn wayland_release(_json: bool, _id: WindowId) -> Result<i32> {
     bail!("Wayland backend is not available on this host")
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn print_report(json: bool, report: &TickReport) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(report)?);
