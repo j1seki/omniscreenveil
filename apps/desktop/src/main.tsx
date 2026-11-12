@@ -2,7 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import Surface from "./Surface";
-import "./styles.css";
+import "./index.css";
 
 const surfaceOnly = new URLSearchParams(window.location.search).get("surface") === "1";
 
