@@ -304,5 +304,5 @@ public enum VeilMac {
 
 /// Windows owned by this process, for `SCContentFilter(display:excludingWindows:)`.
 private func ownWindows(in content: SCShareableContent) -> [SCWindow] {
-    content.windows.filter { $0.owningApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier }
+    content.windows.filter { $0.owningApplication?.processID == ProcessInfo.processInfo.processIdentifier }
 }

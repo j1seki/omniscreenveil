@@ -175,7 +175,7 @@ mod win {
 
     unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let out = &mut *(lparam as *mut Vec<RawWindow>);
-        let exstyle = GetWindowLongW(hwnd, GWL_EXSTYLE as i32) as u32;
+        let exstyle = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
         if exstyle & WS_EX_TOOLWINDOW != 0 {
             return TRUE;
         }
@@ -340,7 +340,7 @@ mod win {
                     return Err(err);
                 }
                 let kernel = GetModuleHandleW(wide("kernel32.dll").as_ptr());
-                let load_library = GetProcAddress(kernel, b"LoadLibraryW\0".as_ptr());
+                let load_library = GetProcAddress(kernel, c"LoadLibraryW".as_ptr().cast());
                 let Some(load_library) = load_library else {
                     VirtualFreeEx(process, remote, 0, MEM_RELEASE);
                     CloseHandle(process);
