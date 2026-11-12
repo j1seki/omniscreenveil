@@ -80,13 +80,6 @@ jobs:
         env:
           VEIL_MACOS_STATIC_LIB: ${{ github.workspace }}/platform/macos/.build/release/libVeilMac.a
 
-      - name: Portable Windows build (no installer)
-        if: runner.os == 'Windows'
-        working-directory: apps/desktop/src-tauri
-        run: pnpm tauri build --target ${{ matrix.target }} --bundles app --config tauri.portable.conf.json
-        env:
-          VEIL_MACOS_STATIC_LIB: ${{ github.workspace }}/platform/macos/.build/release/libVeilMac.a
-
       - name: Zip portable Windows build
         if: runner.os == 'Windows'
         shell: pwsh
