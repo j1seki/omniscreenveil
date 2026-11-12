@@ -409,7 +409,7 @@ fn list_x11(json: bool) -> Result<i32> {
     Ok(0)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn list_x11(_json: bool) -> Result<i32> {
     bail!("X11 inventory is only available on Unix hosts")
 }
@@ -443,7 +443,7 @@ fn list_wayland(json: bool) -> Result<i32> {
     Ok(0)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn list_wayland(_json: bool) -> Result<i32> {
     bail!("Wayland inventory is only available on Unix hosts")
 }
@@ -475,7 +475,7 @@ fn x11_plan_and_capture(
     Ok((plan, frame))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn x11_plan_and_capture(
     _ids: &[WindowId],
 ) -> Result<(veil_surface::SurfacePlan, veil_surface::Frame)> {
@@ -508,7 +508,7 @@ fn wayland_plan_and_capture(
     Ok((plan, frame))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn wayland_plan_and_capture(
     _ids: &[WindowId],
 ) -> Result<(veil_surface::SurfacePlan, veil_surface::Frame)> {
@@ -713,7 +713,7 @@ fn x11_protect(json: bool, id: WindowId, mode: ProtectionMode) -> Result<i32> {
     Ok(if report.failed.is_empty() { 0 } else { 1 })
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn x11_protect(_json: bool, _id: WindowId, _mode: ProtectionMode) -> Result<i32> {
     bail!("X11 backend is not available on this host")
 }
@@ -733,7 +733,7 @@ fn x11_release(json: bool, id: WindowId) -> Result<i32> {
     Ok(0)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn x11_release(_json: bool, _id: WindowId) -> Result<i32> {
     bail!("X11 backend is not available on this host")
 }
@@ -753,7 +753,7 @@ fn wayland_protect(json: bool, id: WindowId, mode: ProtectionMode) -> Result<i32
     Ok(if report.failed.is_empty() { 0 } else { 1 })
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn wayland_protect(_json: bool, _id: WindowId, _mode: ProtectionMode) -> Result<i32> {
     bail!("Wayland backend is not available on this host")
 }
@@ -779,7 +779,7 @@ fn wayland_release(json: bool, id: WindowId) -> Result<i32> {
     Ok(0)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn wayland_release(_json: bool, _id: WindowId) -> Result<i32> {
     bail!("Wayland backend is not available on this host")
 }
