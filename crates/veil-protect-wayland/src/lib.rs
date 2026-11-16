@@ -215,7 +215,10 @@ impl WaylandBackend {
             .unwrap_or_default();
         match self.compositor {
             Compositor::Sway => {
-                let workspace = track.workspace.unwrap_or_else(|| "current".into());
+                let workspace = track
+                    .workspace
+                    .filter(|workspace| workspace != SWAY_HIDDEN_WORKSPACE)
+                    .unwrap_or_else(|| "current".into());
                 let command = format!(
                     "[con_id={}] move container to workspace {}",
                     window.0,
@@ -224,10 +227,16 @@ impl WaylandBackend {
                 run("swaymsg", &[command.as_str()])?;
             }
             Compositor::Hyprland => {
-                let workspace = track
-                    .workspace_id
-                    .map(|id| id.to_string())
-                    .unwrap_or_else(|| "e+0".into());
+                // A window found on the hidden workspace has no recorded
+                // original workspace (the CLI is a fresh process), so restore
+                // it to the current one instead of leaving it hidden.
+                let workspace = match track.workspace.as_deref() {
+                    Some(HYPRLAND_HIDDEN_WORKSPACE) => "current".to_string(),
+                    _ => track
+                        .workspace_id
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| "current".into()),
+                };
                 let command = format!(
                     "movetoworkspacesilent {},address:{}",
                     workspace,
@@ -265,6 +274,19 @@ impl ProtectionBackend for WaylandBackend {
     }
 
     fn release(&mut self, window: WindowId) -> Result<(), BackendError> {
+        let hidden = match self.tracks.borrow().get(&window) {
+            Some(track) => {
+                track.hidden
+                    || track.workspace.as_deref() == Some(SWAY_HIDDEN_WORKSPACE)
+                    || track.workspace.as_deref() == Some(HYPRLAND_HIDDEN_WORKSPACE)
+            }
+            None => false,
+        };
+        if !hidden {
+            // Surface mode never moved the window; do not yank it to another
+            // workspace just because the engine is switching modes.
+            return Ok(());
+        }
         self.show(window)
             .map_err(|err| BackendError::failed(err.to_string()))
     }
@@ -323,14 +345,13 @@ fn parse_sway_tree(json: &str, own_pid: u32) -> Result<Inventory, WaylandError> 
         serde_json::from_str(json).map_err(|err| WaylandError::Parse(err.to_string()))?;
     let mut inventory = Inventory::default();
     let mut workspace = None;
-    walk_sway(&root, (0, 0), &mut workspace, own_pid, &mut inventory);
+    walk_sway(&root, &mut workspace, own_pid, &mut inventory);
     inventory.windows.sort_by_key(|window| window.id);
     Ok(inventory)
 }
 
 fn walk_sway(
     node: &serde_json::Value,
-    origin: (i32, i32),
     workspace: &mut Option<String>,
     own_pid: u32,
     out: &mut Inventory,
@@ -352,8 +373,9 @@ fn walk_sway(
         .and_then(|value| value.get("height"))
         .and_then(|value| value.as_u64())
         .unwrap_or(0);
-    let x = origin.0.saturating_add(rel_x);
-    let y = origin.1.saturating_add(rel_y);
+    // sway IPC rects are already in global layout coordinates.
+    let x = rel_x;
+    let y = rel_y;
 
     let node_type = node
         .get("type")
@@ -434,7 +456,7 @@ fn walk_sway(
     for key in ["nodes", "floating_nodes"] {
         if let Some(children) = node.get(key).and_then(|value| value.as_array()) {
             for child in children {
-                walk_sway(child, (x, y), workspace, own_pid, out);
+                walk_sway(child, workspace, own_pid, out);
             }
         }
     }
@@ -729,6 +751,13 @@ mod tests {
         let second = &inventory.windows[1];
         assert_eq!(second.app_name, "signal");
         assert!(!second.visible);
+    }
+
+    #[test]
+    fn sway_rectangles_are_global_not_relative_to_parent() {
+        let tree = r#"{"type":"root","rect":{"x":0,"y":0},"nodes":[{"type":"output","rect":{"x":1920,"y":0},"nodes":[{"type":"workspace","name":"2","rect":{"x":1920,"y":0},"nodes":[{"type":"con","id":42,"pid":99,"name":"Editor","app_id":"editor","rect":{"x":1950,"y":50,"width":400,"height":300}}]}]}]}"#;
+        let inventory = parse_sway_tree(tree, 100).unwrap();
+        assert_eq!(inventory.windows[0].bounds, Rect::new(1950, 50, 400, 300));
     }
 
     #[test]

@@ -122,9 +122,15 @@ impl PlatformCapabilities {
         let mut modes = BTreeMap::new();
         match platform {
             Platform::Windows => {
-                modes.insert(ProtectionMode::Exclusion, CapabilityLevel::Native);
-                modes.insert(ProtectionMode::Surface, CapabilityLevel::Native);
-                modes.insert(ProtectionMode::StrictHide, CapabilityLevel::Native);
+                modes.insert(ProtectionMode::Exclusion, CapabilityLevel::Partial { detail: "Experimental: requires injecting a helper into the target process. Some applications block injection, and affinity is not proof that a capture path respects it.".into() });
+                modes.insert(ProtectionMode::Surface, CapabilityLevel::Partial { detail: "Experimental GDI capture. Test masking in your actual sharing application; capture and display scaling may differ.".into() });
+                modes.insert(
+                    ProtectionMode::StrictHide,
+                    CapabilityLevel::Partial {
+                        detail: "Uses ShowWindow; restoration after a crash is not guaranteed."
+                            .into(),
+                    },
+                );
             }
             Platform::MacOs => {
                 modes.insert(
@@ -135,8 +141,8 @@ impl PlatformCapabilities {
                             .into(),
                     },
                 );
-                modes.insert(ProtectionMode::Surface, CapabilityLevel::Native);
-                modes.insert(ProtectionMode::StrictHide, CapabilityLevel::Native);
+                modes.insert(ProtectionMode::Surface, CapabilityLevel::Partial { detail: "Requires macOS 14 and Screen Recording permission; display scaling and multi-monitor layouts need runtime validation.".into() });
+                modes.insert(ProtectionMode::StrictHide, CapabilityLevel::Partial { detail: "Requires Accessibility permission; restoration after a crash is not guaranteed.".into() });
             }
             Platform::LinuxX11 => {
                 modes.insert(

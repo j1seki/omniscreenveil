@@ -1,4 +1,4 @@
-import { AlertTriangle, Info, XCircle } from "lucide-react";
+import { AlertTriangle, Terminal, XCircle } from "lucide-react";
 
 export function BackendBanner({
   tone,
@@ -10,19 +10,20 @@ export function BackendBanner({
   children: React.ReactNode;
 }) {
   const styles = {
-    info: "border-line bg-panel text-ink-dim",
-    warning: "border-warn/30 bg-warn/10 text-warn",
-    error: "border-bad/30 bg-bad/10 text-bad",
+    info: "border-cyan/30 bg-cyan/[0.06] text-ink-dim",
+    warning: "border-warn/40 bg-warn/[0.08] text-warn",
+    error: "border-bad/50 bg-bad/[0.12] text-bad",
   } as const;
-  const Icon = tone === "error" ? XCircle : tone === "warning" ? AlertTriangle : Info;
+  const Icon = tone === "error" ? XCircle : tone === "warning" ? AlertTriangle : Terminal;
   return (
     <div
       role={tone === "error" ? "alert" : undefined}
-      className={`flex items-start gap-2.5 rounded-lg border px-3.5 py-2.5 text-xs leading-relaxed ${styles[tone]}`}
+      className={`flex items-center gap-2.5 rounded-lg border px-3 py-1.5 font-mono text-[11px] leading-snug ${styles[tone]}`}
     >
-      <Icon className="mt-0.5 size-4 shrink-0" />
-      <div>
-        <strong className="font-semibold">{title}</strong> {children}
+      <Icon className="size-3.5 shrink-0 text-accent" />
+      <div className="min-w-0 flex-1 truncate">
+        <strong className="font-bold text-ink">{title}</strong>{" "}
+        <span className="opacity-90">{children}</span>
       </div>
     </div>
   );

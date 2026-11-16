@@ -49,7 +49,7 @@ overlays) and our own process, and that the legacy private symbols
 `CGSSetWindowCaptureExcluded` / `SLSSetWindowCaptureState` are *not* used.
 
 **Conclusion already encoded:** `Exclusion` is unsupported on macOS. The Surface
-(ScreenCaptureKit) and strict hide (Accessibility `AXHidden`) are the product.
+(ScreenCaptureKit) and strict hide (Accessibility `AXMinimized`) are the product.
 
 ## Linux / X11
 

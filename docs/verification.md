@@ -1,8 +1,10 @@
 # Verification
 
-OmniScreenVeil does not accept "the API returned success" as proof. Every
-protection claim is checked against pixels captured through the path an audience
-would use.
+The desktop audit is a synthetic compositor self-test. It does **not** verify
+your selected windows, the Windows display-affinity setting, or the capture path
+used by your meeting or recording application. Test that actual capture path
+before sharing sensitive content. Windows and macOS runtime behavior has not
+been validated in this Linux environment.
 
 ## The harness
 
@@ -71,7 +73,8 @@ These are deliberately not claimed from a Linux VM.
 
 ### Windows
 
-1. Build `veil_hook_win.dll` and the app with the MSVC toolchain.
+1. Build the app with the MSVC toolchain; `pnpm build` stages
+   `veil_hook_win.dll` next to the executable automatically.
 2. Start a canary host (any window drawing a known token) and a capture client
    that uses Windows Graphics Capture (OBS "Windows 10" source, or the bundled
    verifier).

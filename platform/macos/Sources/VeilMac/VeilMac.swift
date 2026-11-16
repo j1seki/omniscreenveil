@@ -72,12 +72,17 @@ public enum VeilMac {
         return AXIsProcessTrustedWithOptions(options as CFDictionary)
     }
 
-    /// Every on-screen top-level window of every process, excluding our own.
+    /// Every top-level window of every process, excluding our own. With
+    /// `includeOffscreen` (the FFI default) minimized windows are included too,
+    /// which strict hide depends on.
     ///
     /// `CGWindowListCopyWindowInfo` is public API and returns geometry without
     /// any permission. Titles are only populated with Screen Recording consent;
     /// an empty title is normal and must not be treated as an error.
-    public static func listWindows(includeOffscreen: Bool = false) -> [VeilWindow] {
+    public static func listWindows(
+        includeOffscreen: Bool = false,
+        includeTiny: Bool = false
+    ) -> [VeilWindow] {
         let options: CGWindowListOption = includeOffscreen
             ? [.optionAll, .excludeDesktopElements]
             : [.optionOnScreenOnly, .excludeDesktopElements]
@@ -104,7 +109,7 @@ public enum VeilMac {
             // Layer 0 is the normal application plane. Menus, the Dock, the
             // menu bar and overlays live above it and must never be candidates.
             if layer.intValue != 0 { continue }
-            if rect.width < 32 || rect.height < 32 { continue }
+            if !includeTiny && (rect.width < 32 || rect.height < 32) { continue }
             let app = entry[kCGWindowOwnerName as String] as? String ?? "pid:\(pid)"
             let bundle = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? ""
             let title = entry[kCGWindowName as String] as? String ?? ""
@@ -158,8 +163,9 @@ public enum VeilMac {
     }
 
     /// macOS has no public CGWindowID -> AXUIElement mapping, so this matches
-    /// by `AXWindowNumber` when the system exposes it, then by title + frame,
-    /// and finally falls back to the focused window for single-window apps.
+    /// by `AXWindowNumber` when exposed, then by a unique title or frame match.
+    /// It refuses to guess when the match is ambiguous: minimizing the wrong
+    /// window is worse than reporting that the window could not be found.
     private static func axWindow(pid: Int32, windowID: UInt32, expected: VeilWindow?) throws
         -> AXUIElement
     {
@@ -167,63 +173,69 @@ public enum VeilMac {
         guard let windows = attribute(app, kAXWindowsAttribute) as? [AXUIElement] else {
             throw VeilMacError.noAccessibilityElement(pid: pid)
         }
-        var fallback: AXUIElement?
+        var frameMatches: [AXUIElement] = []
+        var titleMatches: [AXUIElement] = []
         for window in windows {
             if let number = attribute(window, "AXWindowNumber") as? NSNumber,
                 number.uint32Value == windowID
             {
                 return window
             }
-            if let expected, fallback == nil, let frame = frame(of: window) {
+            guard let expected else { continue }
+            let title = (attribute(window, kAXTitleAttribute) as? String) ?? ""
+            if !expected.title.isEmpty && title == expected.title {
+                titleMatches.append(window)
+            }
+            if let frame = frame(of: window) {
                 let matchesFrame = Int(frame.origin.x.rounded()) == expected.x
                     && Int(frame.origin.y.rounded()) == expected.y
                     && Int(frame.size.width.rounded()) == expected.width
                     && Int(frame.size.height.rounded()) == expected.height
-                let title = (attribute(window, kAXTitleAttribute) as? String) ?? ""
                 if matchesFrame && (expected.title.isEmpty || title == expected.title) {
-                    fallback = window
+                    frameMatches.append(window)
                 }
             }
         }
-        if let fallback { return fallback }
-        if let focused = attribute(app, kAXFocusedWindowAttribute),
-            CFGetTypeID(focused) == AXUIElementGetTypeID()
-        {
-            return focused as! AXUIElement
-        }
+        if frameMatches.count == 1 { return frameMatches[0] }
+        if titleMatches.count == 1 { return titleMatches[0] }
+        if windows.count == 1 { return windows[0] }
         throw VeilMacError.windowNotFound(windowID)
     }
 
-    /// Strict hide: `AXHidden` on the window's Accessibility element. The
-    /// process keeps running and the window is restored by `show`.
+    /// Strict hide: minimize the window's Accessibility element. The process
+    /// keeps running and the window is restored by `show`.
+    ///
+    /// `AXHidden` is an application-level attribute, not a window attribute, so
+    /// setting it on a window fails on macOS. `AXMinimized` is the documented
+    /// per-window equivalent.
     public static func hideWindow(id: UInt32) throws {
         guard isAccessibilityTrusted() else { throw VeilMacError.notTrusted }
-        let windows = listWindows(includeOffscreen: true)
+        let windows = listWindows(includeOffscreen: true, includeTiny: true)
         guard let target = windows.first(where: { $0.id == id }) else {
             throw VeilMacError.windowNotFound(id)
         }
         let element = try axWindow(pid: target.pid, windowID: id, expected: target)
         let result = AXUIElementSetAttributeValue(
-            element, kAXHiddenAttribute as CFString, kCFBooleanTrue
+            element, kAXMinimizedAttribute as CFString, kCFBooleanTrue
         )
         guard result == .success else {
-            throw VeilMacError.axFailure("AXHidden (error \(result.rawValue))")
+            throw VeilMacError.axFailure("AXMinimized (error \(result.rawValue))")
         }
     }
 
     public static func showWindow(id: UInt32) throws {
         guard isAccessibilityTrusted() else { throw VeilMacError.notTrusted }
-        let windows = listWindows(includeOffscreen: true)
+        let windows = listWindows(includeOffscreen: true, includeTiny: true)
         guard let target = windows.first(where: { $0.id == id }) else {
             // Window closed while hidden: nothing to restore.
             return
         }
         let element = try axWindow(pid: target.pid, windowID: id, expected: target)
         let result = AXUIElementSetAttributeValue(
-            element, kAXHiddenAttribute as CFString, kCFBooleanFalse
+            element, kAXMinimizedAttribute as CFString, kCFBooleanFalse
         )
         guard result == .success else {
-            throw VeilMacError.axFailure("AXHidden=false (error \(result.rawValue))")
+            throw VeilMacError.axFailure("AXMinimized=false (error \(result.rawValue))")
         }
     }
 

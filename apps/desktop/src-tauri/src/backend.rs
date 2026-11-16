@@ -30,6 +30,9 @@ pub struct BackendInfo {
     pub note: String,
 }
 
+// One backend instance is created at startup; keeping the variants inline is
+// clearer than boxing them just to satisfy a size lint.
+#[allow(clippy::large_enum_variant)]
 pub enum DesktopBackend {
     #[cfg(target_os = "linux")]
     X11(X11Backend),
@@ -80,7 +83,7 @@ impl DesktopBackend {
             match WaylandBackend::new() {
                 Ok(backend) => {
                     let compositor = backend.compositor().label();
-                    return (
+                    (
                         Self::Wayland(backend),
                         BackendInfo {
                             platform: Platform::LinuxWayland,
@@ -90,21 +93,19 @@ impl DesktopBackend {
                                 "Live {compositor} session. The Surface captures through grim/wlr-screencopy and masks protected windows; strict hide moves them to a private workspace via compositor IPC."
                             ),
                         },
-                    );
+                    )
                 }
-                Err(err) => {
-                    return (
-                        Self::Simulated(MemoryBackend::new(Platform::LinuxWayland)),
-                        BackendInfo {
-                            platform: Platform::LinuxWayland,
-                            name: "Simulated (Wayland)".into(),
-                            live: false,
-                            note: format!(
-                                "Wayland backend unavailable ({err}). Only sway and Hyprland expose the public IPC this build uses; GNOME/KDE need a compositor extension. Protected windows are simulated here."
-                            ),
-                        },
-                    );
-                }
+                Err(err) => (
+                    Self::Simulated(MemoryBackend::new(Platform::LinuxWayland)),
+                    BackendInfo {
+                        platform: Platform::LinuxWayland,
+                        name: "Simulated (Wayland)".into(),
+                        live: false,
+                        note: format!(
+                            "Wayland backend unavailable ({err}). Only sway and Hyprland expose the public IPC this build uses; GNOME/KDE need a compositor extension. Protected windows are simulated here."
+                        ),
+                    },
+                ),
             }
         }
 
@@ -116,9 +117,9 @@ impl DesktopBackend {
                         Self::Windows(backend),
                         BackendInfo {
                             platform: Platform::Windows,
-                            name: "Windows".into(),
+                            name: "Windows (WDA + GDI)".into(),
                             live: true,
-                            note: "Live Windows session. Exclusion injects veil_hook_win.dll; strict hide uses ShowWindow."
+                            note: "Live Windows session. Exclusion uses a helper DLL; Surface uses GDI capture. Test your actual capture application before sharing."
                                 .into(),
                         },
                     );
@@ -215,6 +216,8 @@ impl DesktopBackend {
             Self::X11(backend) => backend.platform().capture_surface().ok(),
             #[cfg(target_os = "linux")]
             Self::Wayland(backend) => backend.capture_root().ok(),
+            #[cfg(windows)]
+            Self::Windows(backend) => backend.capture_root().ok(),
             #[cfg(target_os = "macos")]
             Self::Mac(backend) => backend.capture_root().ok(),
             _ => None,
@@ -223,13 +226,15 @@ impl DesktopBackend {
 
     /// Whether the backend's capture includes its own windows. X11 composites
     /// foreign windows only, and macOS excludes them in ScreenCaptureKit, so
-    /// only the Wayland screencopy path needs the extra mask.
+    /// the Windows GDI and Wayland screencopy paths need the extra mask.
     pub fn capture_includes_own_windows(&self) -> bool {
         match self {
             #[cfg(target_os = "linux")]
             Self::X11(backend) => !backend.platform().has_compositor(),
             #[cfg(target_os = "linux")]
             Self::Wayland(_) => true,
+            #[cfg(windows)]
+            Self::Windows(_) => true,
             _ => false,
         }
     }
@@ -241,6 +246,8 @@ impl DesktopBackend {
             Self::X11(backend) => backend.own_windows(),
             #[cfg(target_os = "linux")]
             Self::Wayland(backend) => backend.own_windows(),
+            #[cfg(windows)]
+            Self::Windows(backend) => backend.own_windows(),
             _ => Vec::new(),
         }
     }

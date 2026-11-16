@@ -8,6 +8,7 @@ mod backend;
 
 use std::collections::BTreeSet;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use base64::Engine as _;
 use serde::Serialize;
@@ -17,7 +18,7 @@ use tauri::{Emitter, Manager, State};
 use veil_core::capability::{PlatformCapabilities, ProtectionMode};
 use veil_core::ids::{AppKey, RuleId, WindowId};
 use veil_core::state::AppliedProtection;
-use veil_core::{ConfigStore, FillStyle, Profile, Size};
+use veil_core::{AutoArm, ConfigStore, FillStyle, Profile, Size};
 use veil_protect::{Engine, TickReport};
 use veil_verify::{SyntheticCapture, SyntheticDesktop, VerificationHarness, VerificationRun};
 
@@ -27,6 +28,8 @@ pub struct AppState {
     engine: Engine<DesktopBackend>,
     store: ConfigStore,
     info: BackendInfo,
+    /// User intent from "Arm now"/"Release all"; auto-arm can override it.
+    armed: bool,
 }
 
 impl AppState {
@@ -42,6 +45,8 @@ pub struct Inventory {
     windows: Vec<veil_core::WindowInfo>,
     backend: BackendInfo,
     applied: Vec<AppliedProtection>,
+    armed: bool,
+    capture_active: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -91,10 +96,14 @@ fn capability_matrix() -> Vec<PlatformCapabilities> {
 fn inventory(state: State<'_, Mutex<AppState>>) -> Result<Inventory, String> {
     let state = lock(&state)?;
     let windows = state.engine.backend.list_windows()?;
+    let capture_active = veil_core::capture_app_running(&windows);
+    let armed = state.engine.should_arm(&windows, state.armed) || !state.engine.applied().is_empty();
     Ok(Inventory {
         windows,
         backend: state.info.clone(),
         applied: state.engine.applied(),
+        armed,
+        capture_active,
     })
 }
 
@@ -127,6 +136,29 @@ fn add_window_rule(
     Ok(state.engine.profile.clone())
 }
 
+/// Protect every app that currently owns a protectable window.
+#[tauri::command]
+fn protect_all(
+    state: State<'_, Mutex<AppState>>,
+    mode: ProtectionMode,
+) -> Result<Profile, String> {
+    let mut state = lock(&state)?;
+    let own_pid = std::process::id();
+    let windows: Vec<_> = state
+        .engine
+        .backend
+        .list_windows()?
+        .into_iter()
+        .filter(|window| window.pid != own_pid)
+        .collect();
+    state.engine.profile.protect_all(&windows, mode);
+    state.armed = true;
+    state.engine.tick(&windows);
+    state.engine.drain_events();
+    state.save()?;
+    Ok(state.engine.profile.clone())
+}
+
 #[tauri::command]
 fn remove_app_rules(
     state: State<'_, Mutex<AppState>>,
@@ -136,6 +168,19 @@ fn remove_app_rules(
     let target = app.normalized();
     state.engine.profile.rules.retain(|rule| {
         !matches!(&rule.target, veil_core::TargetRef::App(key) if key.normalized() == target)
+    });
+    state.save()?;
+    Ok(state.engine.profile.clone())
+}
+
+#[tauri::command]
+fn remove_window_rules(
+    state: State<'_, Mutex<AppState>>,
+    window: WindowId,
+) -> Result<Profile, String> {
+    let mut state = lock(&state)?;
+    state.engine.profile.rules.retain(|rule| {
+        !matches!(&rule.target, veil_core::TargetRef::Window(id) if *id == window)
     });
     state.save()?;
     Ok(state.engine.profile.clone())
@@ -185,12 +230,30 @@ fn reset_profile(state: State<'_, Mutex<AppState>>) -> Result<Profile, String> {
 fn tick(state: State<'_, Mutex<AppState>>) -> Result<TickReport, String> {
     let mut state = lock(&state)?;
     let windows = state.engine.backend.list_windows()?;
+    state.armed = true;
     Ok(state.engine.tick(&windows))
+}
+
+#[tauri::command]
+fn set_auto_arm(state: State<'_, Mutex<AppState>>, auto_arm: AutoArm) -> Result<Profile, String> {
+    let mut state = lock(&state)?;
+    state.engine.profile.auto_arm = auto_arm;
+    if let Ok(windows) = state.engine.backend.list_windows() {
+        let explicit = state.armed;
+        state.engine.auto_tick(&windows, explicit);
+        state.engine.drain_events();
+    }
+    state.save()?;
+    Ok(state.engine.profile.clone())
 }
 
 #[tauri::command]
 fn release_all(state: State<'_, Mutex<AppState>>) -> Result<ReleaseReport, String> {
     let mut state = lock(&state)?;
+    state.armed = false;
+    // A release must remain released instead of auto-arming again two seconds later.
+    state.engine.profile.auto_arm = AutoArm::Off;
+    state.save()?;
     let results = state.engine.release_all();
     state.engine.drain_events();
     let failed = results
@@ -240,7 +303,8 @@ fn preview(state: State<'_, Mutex<AppState>>) -> Result<SurfacePreview, String> 
             };
             (frame, label)
         }
-        None => (synthetic_desktop(&windows), "simulated desktop"),
+        None if !state.info.live => (synthetic_desktop(&windows), "simulated desktop"),
+        None => return Err("Live desktop capture failed. The Surface is unavailable; check capture permissions and platform support.".into()),
     };
 
     let mut plan =
@@ -298,14 +362,19 @@ fn encode_png(frame: &veil_surface::Frame) -> Result<Vec<u8>, String> {
         let mut encoder = png::Encoder::new(&mut out, frame.width, frame.height);
         encoder.set_color(png::ColorType::Rgb);
         encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fast);
         let mut writer = encoder.write_header().map_err(|err| err.to_string())?;
         let mut rgb = Vec::with_capacity(frame.width as usize * frame.height as usize * 3);
-        for y in 0..frame.height {
-            for x in 0..frame.width {
-                let color = frame
-                    .get_pixel(x, y)
-                    .ok_or_else(|| format!("pixel {x},{y} outside frame"))?;
-                rgb.extend_from_slice(&[color.r, color.g, color.b]);
+        match frame.format {
+            veil_surface::PixelFormat::Bgra8 => {
+                for px in frame.pixels.chunks_exact(4) {
+                    rgb.extend_from_slice(&[px[2], px[1], px[0]]);
+                }
+            }
+            veil_surface::PixelFormat::Rgba8 => {
+                for px in frame.pixels.chunks_exact(4) {
+                    rgb.extend_from_slice(&[px[0], px[1], px[2]]);
+                }
             }
         }
         writer
@@ -362,6 +431,7 @@ fn synthetic_desktop(windows: &[veil_core::WindowInfo]) -> veil_surface::Frame {
 fn release_all_now(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<Mutex<AppState>>() {
         if let Ok(mut guard) = state.lock() {
+            guard.armed = false;
             guard.engine.release_all();
             guard.engine.drain_events();
             let _ = guard.save();
@@ -373,6 +443,7 @@ fn release_all_now(app: &tauri::AppHandle) {
 fn arm_now(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<Mutex<AppState>>() {
         if let Ok(mut guard) = state.lock() {
+            guard.armed = true;
             if let Ok(windows) = guard.engine.backend.list_windows() {
                 guard.engine.tick(&windows);
                 guard.engine.drain_events();
@@ -393,10 +464,54 @@ fn toggle_now(app: &tauri::AppHandle) {
         })
         .unwrap_or(false);
     if armed {
+        if let Some(state) = app.try_state::<Mutex<AppState>>() {
+            if let Ok(mut guard) = state.lock() {
+                guard.engine.profile.auto_arm = AutoArm::Off;
+            }
+        }
         release_all_now(app);
     } else {
         arm_now(app);
     }
+}
+
+/// Background reconciliation so rules follow windows opened after startup and
+/// auto-arm reacts when a capture app appears or disappears.
+fn start_auto_monitor(app: tauri::AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(2000));
+        let Some(state) = app.try_state::<Mutex<AppState>>() else {
+            continue;
+        };
+        let mut guard = match state.lock() {
+            Ok(guard) => guard,
+            Err(_) => continue,
+        };
+        // Idle default configuration needs no inventory scan at all; the user
+        // has not armed anything and no auto-arm policy is active.
+        let needs_scan = guard.armed
+            || !guard.engine.applied().is_empty()
+            || guard.engine.profile.auto_arm != AutoArm::Off;
+        if !needs_scan {
+            continue;
+        }
+        let windows = match guard.engine.backend.list_windows() {
+            Ok(windows) => windows,
+            Err(_) => continue,
+        };
+        let report = {
+            let explicit = guard.armed;
+            guard.engine.auto_tick(&windows, explicit)
+        };
+        let events = guard.engine.drain_events();
+        if report.tick.as_ref().is_some_and(|tick| tick.pruned_rules > 0) {
+            let _ = guard.save();
+        }
+        drop(guard);
+        if report.did_work() || !events.is_empty() {
+            let _ = app.emit("veil://changed", ());
+        }
+    });
 }
 
 /// Open (or focus) the clean window the user shares.
@@ -431,26 +546,10 @@ fn open_surface(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 pub fn run() {
-    let store = ConfigStore::default_path();
-    let profile = match ConfigStore::new(&store).load() {
-        Ok(profile) => profile,
-        Err(err) => {
-            eprintln!("veil: could not load profile, starting fresh: {err}");
-            Profile::new()
-        }
-    };
-    let (backend, info) = DesktopBackend::detect();
-    let engine = Engine::new(profile, backend);
-    let state = Mutex::new(AppState {
-        engine,
-        store: ConfigStore::new(store),
-        info,
-    });
-
     use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
     let toggle_shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyV);
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
@@ -460,7 +559,6 @@ pub fn run() {
                 })
                 .build(),
         )
-        .manage(state)
         .invoke_handler(tauri::generate_handler![
             capabilities,
             capability_matrix,
@@ -468,18 +566,55 @@ pub fn run() {
             get_profile,
             add_app_rule,
             add_window_rule,
+            protect_all,
             remove_app_rules,
+            remove_window_rules,
             remove_rule,
             set_rule_enabled,
             set_rule_mode,
             reset_profile,
             tick,
+            set_auto_arm,
             release_all,
             preview,
             verify,
             open_surface,
         ])
         .setup(move |app| {
+            // Resolve the profile location through Tauri so the portable
+            // config (`appDirectoriesOverride`) actually keeps data next to
+            // the executable. Falling back to the legacy per-user path keeps
+            // development builds usable if the resolver is unavailable.
+            let store = app
+                .path()
+                .app_config_dir()
+                .map(|dir| dir.join("profile.json"))
+                .unwrap_or_else(|err| {
+                    eprintln!("veil: could not resolve app config dir: {err}");
+                    ConfigStore::default_path()
+                });
+            let profile = match ConfigStore::new(&store).load() {
+                Ok(profile) => profile,
+                Err(err) => {
+                    eprintln!("veil: could not load profile, starting fresh: {err}");
+                    Profile::new()
+                }
+            };
+            let (backend, info) = DesktopBackend::detect();
+            let mut engine = Engine::new(profile, backend);
+            if engine.profile.auto_arm != AutoArm::Off {
+                if let Ok(windows) = engine.backend.list_windows() {
+                    engine.auto_tick(&windows, false);
+                    engine.drain_events();
+                }
+            }
+            app.manage(Mutex::new(AppState {
+                engine,
+                store: ConfigStore::new(store),
+                info,
+                armed: false,
+            }));
+
             let open = MenuItem::with_id(app, "open", "Open OmniScreenVeil", true, None::<&str>)?;
             let surface =
                 MenuItem::with_id(app, "surface", "Open Surface window", true, None::<&str>)?;
@@ -522,8 +657,21 @@ pub fn run() {
             if let Err(err) = app.global_shortcut().register(toggle_shortcut) {
                 eprintln!("veil: Ctrl+Shift+V is unavailable ({err}); use the tray or the UI");
             }
+
+            start_auto_monitor(app.handle().clone());
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running OmniScreenVeil");
+        .build(tauri::generate_context!())
+        .expect("error while building OmniScreenVeil");
+
+    // Never leave a hidden window, an exclusion property or a moved workspace
+    // behind when the app exits (tray quit, Cmd+Q, last window closed).
+    app.run(|app_handle, event| {
+        if matches!(
+            event,
+            tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }
+        ) {
+            release_all_now(app_handle);
+        }
+    });
 }

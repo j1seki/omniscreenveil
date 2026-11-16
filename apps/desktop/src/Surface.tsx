@@ -22,7 +22,10 @@ export default function Surface() {
         setSrc(`data:image/png;base64,${frame.png_base64}`);
         setError(null);
       } catch (err) {
-        if (alive) setError(String(err));
+        if (alive) {
+          setSrc(null);
+          setError(String(err));
+        }
       } finally {
         if (alive) timer = window.setTimeout(poll, 1500);
       }

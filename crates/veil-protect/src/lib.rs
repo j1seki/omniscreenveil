@@ -9,7 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use veil_core::capability::{PlatformCapabilities, ProtectionMode};
-use veil_core::reconcile::{plan, Conflict, ReconcilePlan};
+use veil_core::capture_apps::capture_app_running;
+use veil_core::reconcile::{plan_with_caps, Conflict, ReconcilePlan};
+use veil_core::rules::AutoArm;
 use veil_core::state::{AppliedProtection, ApplyStatus, ProtectionIntent};
 use veil_core::window::{Platform, WindowInfo};
 use veil_core::{Profile, WindowId};
@@ -99,6 +101,23 @@ impl TickReport {
     }
 }
 
+/// Outcome of one automatic-monitor pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AutoTickReport {
+    /// Whether the auto-arm policy wanted protection active.
+    pub armed: bool,
+    /// Reconciliation result when armed.
+    pub tick: Option<TickReport>,
+    /// Releases performed because the policy disarmed.
+    pub released: Vec<(WindowId, Option<String>)>,
+}
+
+impl AutoTickReport {
+    pub fn did_work(&self) -> bool {
+        self.tick.as_ref().is_some_and(TickReport::did_work) || !self.released.is_empty()
+    }
+}
+
 #[derive(Debug)]
 pub struct Engine<B: ProtectionBackend> {
     pub profile: Profile,
@@ -167,9 +186,47 @@ impl<B: ProtectionBackend> Engine<B> {
 
     pub fn plan(&self, windows: &[WindowInfo]) -> ReconcilePlan {
         let applied: Vec<_> = self.applied.values().cloned().collect();
-        let mut plan = plan(&self.profile, windows, &applied);
-        plan.downgrade(&self.caps);
-        plan
+        plan_with_caps(&self.profile, windows, &applied, &self.caps)
+    }
+
+    /// Whether the configured auto-arm policy wants protection active.
+    ///
+    /// `explicit` is the user's arm switch. `Off` requires it, `Always` ignores
+    /// it, and `CaptureAppRunning` uses it as a manual override on top of the
+    /// running-capture-app heuristic.
+    pub fn should_arm(&self, windows: &[WindowInfo], explicit: bool) -> bool {
+        match self.profile.auto_arm {
+            AutoArm::Off => explicit,
+            AutoArm::Always => true,
+            AutoArm::CaptureAppRunning => explicit || capture_app_running(windows),
+        }
+    }
+
+    /// One monitor pass: arm and reconcile when the policy says so, otherwise
+    /// release anything currently applied while keeping the rules intact.
+    pub fn auto_tick(&mut self, windows: &[WindowInfo], explicit: bool) -> AutoTickReport {
+        let armed = self.should_arm(windows, explicit);
+        if armed {
+            let tick = self.tick(windows);
+            AutoTickReport {
+                armed,
+                tick: Some(tick),
+                released: Vec::new(),
+            }
+        } else if self.applied.is_empty() {
+            AutoTickReport {
+                armed,
+                tick: None,
+                released: Vec::new(),
+            }
+        } else {
+            let released = self.release_all();
+            AutoTickReport {
+                armed,
+                tick: None,
+                released,
+            }
+        }
     }
 
     /// One reconciliation pass. Call on a timer, on window events, or on any
@@ -206,6 +263,36 @@ impl<B: ProtectionBackend> Engine<B> {
                     applied: intent.mode,
                 });
                 report.upgraded_to_surface.push(intent.window);
+            }
+
+            // A window can only be in one mode. Release the previous
+            // protection before applying a different one, otherwise strict
+            // hide would stay in effect underneath a Surface mask, or an
+            // exclusion would survive a switch to strict hide.
+            if let Some(current) = self.applied.get(&intent.window).cloned() {
+                if current.status.is_applied() && current.mode != intent.mode {
+                    match self.backend.release(intent.window) {
+                        Ok(()) => {
+                            self.applied.remove(&intent.window);
+                            self.events.push(Event::Released {
+                                window: intent.window,
+                            });
+                        }
+                        Err(err) => {
+                            let reason = format!(
+                                "could not release {} before switching to {}: {err}",
+                                current.mode.label(),
+                                intent.mode.label()
+                            );
+                            self.events.push(Event::Failed {
+                                window: intent.window,
+                                reason: reason.clone(),
+                            });
+                            report.failed.push((intent.window, reason));
+                            continue;
+                        }
+                    }
+                }
             }
 
             match self.backend.apply(&intent) {
@@ -449,12 +536,52 @@ mod tests {
                 ..
             }
         )));
+
+        let calls = engine.backend.calls.len();
+        let second = engine.tick(&live());
+        assert!(!second.did_work(), "downgraded windows must stay unchanged");
+        assert_eq!(second.unchanged, 2);
+        assert_eq!(engine.backend.calls.len(), calls);
+    }
+
+    #[test]
+    fn switching_modes_releases_the_previous_protection_first() {
+        let mut profile = Profile::new();
+        profile.add_app_rule(
+            AppKey::LinuxAppId("chrome".into()),
+            ProtectionMode::StrictHide,
+        );
+        let mut engine = Engine::new(profile, MemoryBackend::new(Platform::LinuxX11));
+        engine.tick(&live());
+        assert_eq!(
+            engine.backend.applied_modes().get(&WindowId(1)),
+            Some(&ProtectionMode::StrictHide)
+        );
+
+        engine.profile.rules[0].mode = ProtectionMode::Surface;
+        let report = engine.tick(&live());
+        assert_eq!(report.applied.len(), 2);
+        assert!(
+            engine
+                .backend
+                .calls
+                .iter()
+                .any(|call| call == "release:WindowId(1)"),
+            "previous mode should be released before Surface is applied"
+        );
+        assert_eq!(
+            engine.backend.applied_modes().get(&WindowId(1)),
+            Some(&ProtectionMode::Surface)
+        );
     }
 
     #[test]
     fn conflicts_are_exposed() {
         let mut profile = chrome_rule(ProtectionMode::StrictHide);
-        profile.add_app_rule(AppKey::LinuxAppId("chrome".into()), ProtectionMode::Surface);
+        profile.add_rule(
+            veil_core::TargetRef::App(AppKey::LinuxAppId("chrome".into())),
+            ProtectionMode::Surface,
+        );
         let mut engine = Engine::new(profile, MemoryBackend::new(Platform::Windows));
         let report = engine.tick(&live());
         assert_eq!(report.conflicts.len(), 2);
@@ -484,5 +611,75 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert!(matches!(events[0], Event::Applied { .. }));
         assert!(engine.drain_events().is_empty());
+    }
+
+    fn with_obs() -> Vec<WindowInfo> {
+        windows(vec![
+            window(1, "chrome", "A", veil_core::Rect::new(0, 0, 800, 600)),
+            window(2, "chrome", "B", veil_core::Rect::new(0, 0, 800, 600)),
+            window(9, "obs", "OBS 31.0", veil_core::Rect::new(0, 0, 640, 480)),
+        ])
+    }
+
+    #[test]
+    fn off_policy_waits_for_explicit_arm() {
+        let mut engine = Engine::new(
+            chrome_rule(ProtectionMode::StrictHide),
+            MemoryBackend::new(Platform::Windows),
+        );
+
+        let report = engine.auto_tick(&live(), false);
+        assert!(!report.armed);
+        assert!(!report.did_work());
+        assert!(engine.applied().is_empty());
+
+        let report = engine.auto_tick(&live(), true);
+        assert!(report.armed);
+        assert_eq!(report.tick.as_ref().unwrap().applied.len(), 2);
+        assert_eq!(engine.applied().len(), 2);
+    }
+
+    #[test]
+    fn always_policy_arms_without_user_action() {
+        let mut profile = chrome_rule(ProtectionMode::StrictHide);
+        profile.auto_arm = veil_core::AutoArm::Always;
+        let mut engine = Engine::new(profile, MemoryBackend::new(Platform::Windows));
+
+        let report = engine.auto_tick(&live(), false);
+        assert!(report.armed);
+        assert!(report.did_work());
+        assert_eq!(engine.applied().len(), 2);
+    }
+
+    #[test]
+    fn capture_policy_arms_and_releases_with_the_capture_app() {
+        let mut profile = chrome_rule(ProtectionMode::StrictHide);
+        profile.auto_arm = veil_core::AutoArm::CaptureAppRunning;
+        let mut engine = Engine::new(profile, MemoryBackend::new(Platform::Windows));
+
+        let report = engine.auto_tick(&with_obs(), false);
+        assert!(report.armed);
+        assert_eq!(engine.applied().len(), 2);
+
+        let report = engine.auto_tick(&live(), false);
+        assert!(!report.armed);
+        assert_eq!(report.released.len(), 2);
+        assert!(engine.applied().is_empty());
+        assert_eq!(
+            engine.profile.rules.len(),
+            1,
+            "auto-disarm must keep persistent rules"
+        );
+    }
+
+    #[test]
+    fn explicit_arm_overrides_a_missing_capture_app() {
+        let mut profile = chrome_rule(ProtectionMode::StrictHide);
+        profile.auto_arm = veil_core::AutoArm::CaptureAppRunning;
+        let mut engine = Engine::new(profile, MemoryBackend::new(Platform::Windows));
+
+        let report = engine.auto_tick(&live(), true);
+        assert!(report.armed);
+        assert_eq!(engine.applied().len(), 2);
     }
 }

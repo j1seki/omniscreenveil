@@ -157,9 +157,12 @@ pub fn detect_in(frame: &Frame, token: Token, cell: u32, region: Rect) -> Detect
     }
     let max_x = frame.width - size.w;
     let max_y = frame.height - size.h;
-    let region = region
-        .clip_to(frame.bounds())
-        .unwrap_or(Rect::new(0, 0, 0, 0));
+    let region = match region.clip_to(frame.bounds()) {
+        Some(region) if !region.is_empty() => region,
+        // An empty search region must never fall through to (0, 0) and find a
+        // pattern that is not actually inside it.
+        _ => return Detection::miss(),
+    };
     let start_x = region.x.max(0) as u32;
     let start_y = region.y.max(0) as u32;
     let end_x = (region.right().max(0) as u32).min(max_x);
@@ -264,6 +267,15 @@ mod tests {
         render_at(&mut desktop, token, 8, Point { x: 250, y: 150 });
         assert!(!detect_in(&desktop, token, 8, Rect::new(0, 0, 100, 100)).found);
         assert!(detect_in(&desktop, token, 8, Rect::new(200, 100, 200, 200)).found);
+    }
+
+    #[test]
+    fn empty_region_never_matches_the_origin() {
+        let token = Token::from_seed("empty-region");
+        let mut desktop = veil_frame(400, 300);
+        render_at(&mut desktop, token, 8, Point { x: 0, y: 0 });
+        assert!(!detect_in(&desktop, token, 8, Rect::new(0, 0, 0, 0)).found);
+        assert!(!detect_in(&desktop, token, 8, Rect::new(999, 999, 0, 0)).found);
     }
 
     #[test]

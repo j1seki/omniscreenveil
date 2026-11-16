@@ -17,9 +17,7 @@ use veil_core::capability::ProtectionMode;
 use veil_core::ids::{AppKey, WindowId};
 use veil_core::testutil::demo_windows;
 use veil_core::{Platform, PlatformCapabilities, Profile, Size, VerifyOutcome};
-#[cfg(target_os = "linux")]
-use veil_protect::TickReport;
-use veil_protect::{Engine, MemoryBackend};
+use veil_protect::{Engine, MemoryBackend, TickReport};
 use veil_verify::{SyntheticCapture, SyntheticDesktop, VerificationHarness};
 
 #[derive(Parser)]
@@ -374,10 +372,22 @@ fn cmd_list(json: bool) -> Result<i32> {
             Ok(0)
         }
         Platform::MacOs => {
-            bail!(
-                "macOS window inventory is provided by the Swift helper; run \
-                 `platform/macos/veilmac-spike list`"
-            )
+            let backend = veil_protect_macos::MacBackend::new()?;
+            let windows = backend.list_windows()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&windows)?);
+            } else {
+                for w in &windows {
+                    println!(
+                        "{:<10} {:<8} {:<22} {}",
+                        w.id.to_string(),
+                        w.pid,
+                        truncate(&w.app_name, 22),
+                        truncate(&w.display_name(), 60)
+                    );
+                }
+            }
+            Ok(0)
         }
         Platform::LinuxWayland => list_wayland(json),
     }
@@ -515,6 +525,49 @@ fn wayland_plan_and_capture(
     bail!("--live Wayland capture is only available on Unix hosts")
 }
 
+fn win_plan_and_capture(
+    ids: &[WindowId],
+) -> Result<(veil_surface::SurfacePlan, veil_surface::Frame)> {
+    let backend = veil_protect_win::WinBackend::new()?;
+    let windows = backend.list_windows()?;
+    for id in ids {
+        if !windows.iter().any(|w| w.id == *id) {
+            bail!("window {id} is not a live Windows top-level window");
+        }
+    }
+    let frame = backend.capture_root()?;
+    let mut plan = veil_surface::SurfacePlan::new(frame.size(), veil_core::FillStyle::veiled());
+    for window in &windows {
+        if ids.contains(&window.id) {
+            plan = plan.exclude(window.bounds);
+        }
+    }
+    for own in backend.own_windows() {
+        plan = plan.exclude(own);
+    }
+    Ok((plan, frame))
+}
+
+fn macos_plan_and_capture(
+    ids: &[WindowId],
+) -> Result<(veil_surface::SurfacePlan, veil_surface::Frame)> {
+    let backend = veil_protect_macos::MacBackend::new()?;
+    let windows = backend.list_windows()?;
+    for id in ids {
+        if !windows.iter().any(|w| w.id == *id) {
+            bail!("window {id} is not a live macOS top-level window");
+        }
+    }
+    let frame = backend.capture_root()?;
+    let mut plan = veil_surface::SurfacePlan::new(frame.size(), veil_core::FillStyle::veiled());
+    for window in &windows {
+        if ids.contains(&window.id) {
+            plan = plan.exclude(window.bounds);
+        }
+    }
+    Ok((plan, frame))
+}
+
 fn truncate(value: &str, max: usize) -> String {
     if value.chars().count() <= max {
         return value.to_string();
@@ -537,7 +590,9 @@ fn cmd_surface(json: bool, out: &PathBuf, protect: &[String], live: bool) -> Res
     let (plan, source) = if live {
         match Platform::detect() {
             Platform::LinuxWayland => wayland_plan_and_capture(&ids)?,
-            _ => x11_plan_and_capture(&ids)?,
+            Platform::Windows => win_plan_and_capture(&ids)?,
+            Platform::MacOs => macos_plan_and_capture(&ids)?,
+            Platform::LinuxX11 => x11_plan_and_capture(&ids)?,
         }
     } else {
         let size = Size::new(1280, 800);
@@ -677,13 +732,13 @@ fn parse_mode(value: &str) -> Result<ProtectionMode> {
 
 fn cmd_protect(json: bool, window: &str, mode: &str) -> Result<i32> {
     let platform = Platform::detect();
+    let id = parse_window_id(window)?;
+    let mode = parse_mode(mode)?;
     match platform {
-        Platform::LinuxX11 => x11_protect(json, parse_window_id(window)?, parse_mode(mode)?),
-        Platform::LinuxWayland => {
-            wayland_protect(json, parse_window_id(window)?, parse_mode(mode)?)
-        }
-        _ => bail!(
-            "`veil protect` drives the Linux backends; on {} use the desktop app",
+        Platform::LinuxX11 => x11_protect(json, id, mode),
+        Platform::LinuxWayland => wayland_protect(json, id, mode),
+        Platform::Windows | Platform::MacOs => bail!(
+            "Use the desktop app on {}: this short-lived CLI cannot maintain and release protection safely",
             platform.label()
         ),
     }
@@ -784,7 +839,6 @@ fn wayland_release(_json: bool, _id: WindowId) -> Result<i32> {
     bail!("Wayland backend is not available on this host")
 }
 
-#[cfg(target_os = "linux")]
 fn print_report(json: bool, report: &TickReport) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(report)?);

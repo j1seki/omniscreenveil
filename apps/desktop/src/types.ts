@@ -3,6 +3,8 @@
 
 export type ProtectionMode = "exclusion" | "surface" | "strict_hide";
 
+export type AutoArm = "off" | "capture_app_running" | "always";
+
 export type Platform = "windows" | "mac_os" | "linux_x11" | "linux_wayland";
 
 export type CapabilityLevel =
@@ -59,7 +61,7 @@ export interface Profile {
   version: number;
   rules: Rule[];
   surface: unknown;
-  auto_arm: "off" | "capture_app_running" | "always";
+  auto_arm: AutoArm;
   next_rule_id?: number;
 }
 
@@ -85,6 +87,8 @@ export interface Inventory {
   windows: WindowInfo[];
   backend: BackendInfo;
   applied: AppliedProtection[];
+  armed?: boolean;
+  capture_active?: boolean;
 }
 
 export interface TickReport {
@@ -128,21 +132,33 @@ export interface VerificationRun {
   record: VerificationRecord;
 }
 
-export const MODES: { id: ProtectionMode; label: string; blurb: string }[] = [
+export const MODES: {
+  id: ProtectionMode;
+  label: string;
+  shortLabel: string;
+  blurb: string;
+  accent: "emerald" | "cyan" | "amber";
+}[] = [
   {
     id: "exclusion",
     label: "Exclusion",
-    blurb: "OS removes the window from capture. Windows only.",
+    shortLabel: "WDA_EXCLUDE",
+    blurb: "OS removes the window from capture while it stays interactive for you. Windows only.",
+    accent: "emerald",
   },
   {
     id: "surface",
     label: "Veil Surface",
-    blurb: "Share the filtered surface window. Works everywhere.",
+    shortLabel: "VEIL_SURFACE",
+    blurb: "Share the filtered Veil Surface window; test masking before sharing.",
+    accent: "cyan",
   },
   {
     id: "strict_hide",
     label: "Strict hide",
-    blurb: "Hide the window locally for the session, restore after.",
+    shortLabel: "STRICT_HIDE",
+    blurb: "Hide the window on the local desktop for the session, then restore on release.",
+    accent: "amber",
   },
 ];
 
@@ -151,6 +167,13 @@ export const PLATFORM_LABELS: Record<Platform, string> = {
   mac_os: "macOS",
   linux_x11: "Linux (X11)",
   linux_wayland: "Linux (Wayland)",
+};
+
+export const PLATFORM_DRIVERS: Record<Platform, string> = {
+  windows: "WIN32 // WDA_AFFINITY + GDI",
+  mac_os: "DARWIN // SCREENCAPTUREKIT + AX",
+  linux_x11: "X11 // XCOMPOSITE + XPROTO",
+  linux_wayland: "WAYLAND // WLR_SCREENCOPY + IPC",
 };
 
 export function modeLabel(mode: ProtectionMode): string {
@@ -173,4 +196,61 @@ export function levelDetail(level: CapabilityLevel): string {
   if (level.level === "native") return "Works for arbitrary third-party windows.";
   if (level.level === "partial") return level.detail;
   return level.reason;
+}
+
+export function normalizeAppKey(value: string): string {
+  return value.replaceAll("\\", "/").toLowerCase();
+}
+
+export function findRuleForWindow(
+  profile: Profile | null,
+  window: WindowInfo,
+): Rule | undefined {
+  if (!profile) return undefined;
+  const winRule = profile.rules.find(
+    (rule) =>
+      rule.enabled &&
+      rule.target.kind === "window" &&
+      rule.target.value === window.id,
+  );
+  if (winRule) return winRule;
+  return profile.rules.find(
+    (rule) =>
+      rule.enabled &&
+      rule.target.kind === "app" &&
+      normalizeAppKey(rule.target.value.value) === normalizeAppKey(window.app.value),
+  );
+}
+
+const KNOWN_CAPTURE_STEMS = new Set([
+  "obs",
+  "obs64",
+  "obs32",
+  "obs-studio",
+  "discord",
+  "zoom",
+  "teams",
+  "ms-teams",
+  "slack",
+  "sharex",
+  "snippingtool",
+  "flameshot",
+  "kooha",
+  "peek",
+  "loom",
+  "camtasia",
+  "bandicam",
+  "xsplit",
+  "streamlabs",
+  "webex",
+  "skype",
+  "wf-recorder",
+  "spectacle",
+]);
+
+export function isCaptureWindow(window: WindowInfo): boolean {
+  const name = window.app_name.trim().toLowerCase();
+  const raw = normalizeAppKey(window.app.value);
+  const base = (raw.split("/").pop() ?? raw).replace(/\.(exe|app)$/i, "");
+  return KNOWN_CAPTURE_STEMS.has(name) || KNOWN_CAPTURE_STEMS.has(base);
 }

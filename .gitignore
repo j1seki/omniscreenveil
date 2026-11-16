@@ -7,3 +7,4 @@ dist
 /tmp
 .pnpm-store
 *.local.json
+apps/desktop/src-tauri/resources/*.dll

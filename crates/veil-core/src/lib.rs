@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod capability;
+pub mod capture_apps;
 pub mod config;
 pub mod geometry;
 pub mod ids;
@@ -20,10 +21,11 @@ pub mod verification;
 pub mod window;
 
 pub use capability::{CapabilityLevel, ModeCapability, PlatformCapabilities, ProtectionMode};
+pub use capture_apps::{capture_app_running, is_capture_app};
 pub use config::ConfigStore;
 pub use geometry::{Point, Rect, Scale, Size};
 pub use ids::{AppKey, RuleId, WindowId};
-pub use reconcile::{plan, Conflict, ReconcilePlan};
+pub use reconcile::{plan, plan_with_caps, Conflict, ReconcilePlan};
 pub use rules::{AutoArm, Profile, Rule, SurfaceSettings, TargetRef};
 pub use state::{AppliedProtection, ApplyStatus, ProtectionIntent};
 pub use style::{Color, FillStyle};

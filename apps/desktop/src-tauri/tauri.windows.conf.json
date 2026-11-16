@@ -1,0 +1,7 @@
+{
+  "bundle": {
+    "resources": {
+      "resources/veil_hook_win.dll": "veil_hook_win.dll"
+    }
+  }
+}

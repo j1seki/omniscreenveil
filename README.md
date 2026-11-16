@@ -144,8 +144,9 @@ There is no public API for one application to remove another application's
 window from ScreenCaptureKit, so `Exclusion` is reported unsupported. The Veil
 Surface uses ScreenCaptureKit to capture a display (excluding the app's own
 windows in the `SCContentFilter` so the Surface never recurses into itself) and
-masks the protected windows; strict hide uses the Accessibility `AXHidden`
-attribute with the user's consent. `platform/macos` is a small Swift package
+masks the protected windows; strict hide uses the Accessibility
+`AXMinimized` attribute with the user's consent. `platform/macos` is a small
+Swift package
 with a C ABI so the Rust backend can call those public APIs.
 
 ### Linux

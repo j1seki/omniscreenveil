@@ -8,7 +8,7 @@ real machine instead of being claimed from a Linux VM.
 | Command | API | Claim |
 |---|---|---|
 | `list` | `CGWindowListCopyWindowInfo` | real window inventory + geometry, no permissions |
-| `hide` / `show` | Accessibility `AXHidden` | strict-hide works on foreign windows with consent |
+| `hide` / `show` | Accessibility `AXMinimized` | strict-hide works on foreign windows with consent |
 | `capture <display>` | ScreenCaptureKit `SCScreenshotManager` | capture path for the Veil Surface and verifier |
 | `permission` | `AXIsProcessTrustedWithOptions` | clear, prompt-driven consent flow |
 | `selftest` | all of the above | invariants (layer 0 only, own process excluded, sane geometry) |

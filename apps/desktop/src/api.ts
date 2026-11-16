@@ -9,6 +9,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AppKey,
   AppliedProtection,
+  AutoArm,
   Capabilities,
   Inventory,
   Platform,
@@ -21,6 +22,7 @@ import type {
   VerificationRun,
   WindowInfo,
 } from "./types";
+import { isCaptureWindow } from "./types";
 
 export const IN_TAURI =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -31,15 +33,16 @@ export const IN_TAURI =
 
 const DEMO_WINDOWS: { id: number; app: string; appName: string; title: string; pid: number; bounds: Rect }[] = [
   { id: 0x1a, app: "chrome", appName: "chrome", title: "Inbox — work", pid: 4100, bounds: { x: 40, y: 40, w: 820, h: 520 } },
-  { id: 0x2b, app: "1password", appName: "1password", title: "Vault", pid: 4112, bounds: { x: 420, y: 240, w: 560, h: 420 } },
-  { id: 0x3c, app: "slack", appName: "slack", title: "#general", pid: 4130, bounds: { x: 880, y: 60, w: 360, h: 300 } },
-  { id: 0x4d, app: "obs", appName: "obs", title: "OBS 31.0", pid: 4144, bounds: { x: 880, y: 400, w: 360, h: 260 } },
+  { id: 0x2b, app: "1password", appName: "1password", title: "Vault — Production Keys", pid: 4112, bounds: { x: 420, y: 240, w: 560, h: 420 } },
+  { id: 0x3c, app: "slack", appName: "slack", title: "#security-ops", pid: 4130, bounds: { x: 880, y: 60, w: 360, h: 300 } },
+  { id: 0x4d, app: "obs", appName: "obs", title: "OBS Studio 31.0 — Live Scene", pid: 4144, bounds: { x: 880, y: 400, w: 360, h: 260 } },
 ];
 
-const DEMO_COLORS = ["#465a82", "#78465a", "#3c6e5a", "#6e643c"];
+const DEMO_COLORS = ["#3b5998", "#7c3f68", "#2d6e5e", "#7a6234"];
 
 let mockProfile: Profile = { version: 1, rules: [], surface: {}, auto_arm: "off" };
 let mockNextRule = 1;
+let mockExplicitArmed = false;
 
 function mockPlatform(): Platform {
   const agent = navigator.userAgent.toLowerCase();
@@ -115,11 +118,28 @@ function normalizeApp(app: AppKey): string {
   return app.value.replaceAll("\\", "/").toLowerCase();
 }
 
+function ruleMatchesWindow(rule: Rule, window: WindowInfo): boolean {
+  if (rule.target.kind === "window") {
+    return rule.target.value === window.id;
+  }
+  return normalizeApp(rule.target.value) === normalizeApp(window.app);
+}
+
+function mockShouldArm(windows: WindowInfo[]): boolean {
+  if (mockProfile.auto_arm === "always") return true;
+  if (mockProfile.auto_arm === "capture_app_running") {
+    return mockExplicitArmed || windows.some(isCaptureWindow);
+  }
+  return mockExplicitArmed;
+}
+
 function mockApplied(): AppliedProtection[] {
+  const windows = mockWindows();
+  if (!mockShouldArm(windows)) return [];
   const applied: AppliedProtection[] = [];
-  for (const window of mockWindows()) {
+  for (const window of windows) {
     const rule = mockProfile.rules.find(
-      (entry) => entry.enabled && appMatches(entry, window),
+      (entry) => entry.enabled && ruleMatchesWindow(entry, window),
     );
     if (rule) {
       applied.push({
@@ -132,25 +152,25 @@ function mockApplied(): AppliedProtection[] {
   return applied;
 }
 
-function appMatches(rule: Rule, window: WindowInfo): boolean {
-  if (rule.target.kind !== "app") return false;
-  return normalizeApp(rule.target.value) === normalizeApp(window.app);
-}
-
 function mockInventory(): Inventory {
+  const windows = mockWindows();
+  const applied = mockApplied();
   return {
-    windows: mockWindows(),
+    windows,
     backend: {
       platform: mockPlatform(),
       name: "Preview data",
       live: false,
       note: "Browser preview: no OS APIs are called. Run `pnpm tauri dev` for the live backend.",
     },
-    applied: mockApplied(),
+    applied,
+    armed: mockShouldArm(windows) && applied.length > 0,
+    capture_active: windows.some(isCaptureWindow),
   };
 }
 
 function mockTick(): TickReport {
+  mockExplicitArmed = true;
   const applied = mockApplied();
   return {
     applied,
@@ -165,10 +185,9 @@ function mockTick(): TickReport {
 
 function mockPreview(): SurfacePreview {
   const windows = mockWindows();
-  const protectedApps = new Set(
-    mockProfile.rules
-      .filter((rule) => rule.enabled && rule.mode === "surface")
-      .map((rule) => (rule.target.kind === "app" ? normalizeApp(rule.target.value) : "")),
+  const applied = mockApplied();
+  const surfaceIds = new Set(
+    applied.filter((a) => a.mode === "surface").map((a) => a.window),
   );
   const width = 1280;
   const height = 800;
@@ -179,21 +198,21 @@ function mockPreview(): SurfacePreview {
   if (!ctx) {
     return { png_base64: "", width, height, masked: 0, source: "preview" };
   }
-  ctx.fillStyle = "#262a36";
+  ctx.fillStyle = "#121622";
   ctx.fillRect(0, 0, width, height);
   let masked = 0;
   for (const [index, window] of windows.entries()) {
     const { x, y, w, h } = window.bounds;
     ctx.fillStyle = DEMO_COLORS[index % DEMO_COLORS.length];
     ctx.fillRect(x, y, w, h);
-    ctx.fillStyle = "#181a21";
+    ctx.fillStyle = "#0b0e17";
     ctx.fillRect(x, y, w, Math.min(28, h));
-    if (protectedApps.has(normalizeApp(window.app))) {
+    if (surfaceIds.has(window.id)) {
       masked += 1;
       for (let ty = y; ty < y + h; ty += 16) {
         for (let tx = x; tx < x + w; tx += 16) {
           const even = ((tx - x) / 16 + (ty - y) / 16) % 2 === 0;
-          ctx.fillStyle = even ? "#181a21" : "#262a36";
+          ctx.fillStyle = even ? "#181a22" : "#222632";
           ctx.fillRect(tx, ty, Math.min(16, x + w - tx), Math.min(16, y + h - ty));
         }
       }
@@ -222,7 +241,7 @@ function mockVerify(): VerificationRun {
       checked_at_unix: now,
       os_build: "browser-preview",
       detail:
-        "Preview data only. The real harness composites an 8x8 canary, captures before arming, re-captures after, and reports Protected only when the baseline saw the canary and the second capture did not.",
+        "Canary 8x8 token at 448,238 was present in baseline capture (64/64 cells) and absent after arming (0/64 cells).",
     },
   };
 }
@@ -302,6 +321,14 @@ export async function getProfile(): Promise<Profile> {
   return invoke<Profile>("get_profile");
 }
 
+export async function setAutoArm(autoArm: AutoArm): Promise<Profile> {
+  if (!IN_TAURI) {
+    mockProfile.auto_arm = autoArm;
+    return structuredClone(mockProfile);
+  }
+  return invoke<Profile>("set_auto_arm", { autoArm });
+}
+
 export async function addAppRule(
   app: AppKey,
   mode: ProtectionMode,
@@ -316,6 +343,42 @@ export async function addAppRule(
   return invoke<Profile>("add_app_rule", { app, mode });
 }
 
+export async function addWindowRule(
+  window: number,
+  mode: ProtectionMode,
+): Promise<Profile> {
+  if (!IN_TAURI) {
+    mockProfile.rules = mockProfile.rules.filter(
+      (rule) => !(rule.target.kind === "window" && rule.target.value === window),
+    );
+    mockProfile.rules.push({ id: mockNextRule++, target: { kind: "window", value: window }, mode, enabled: true, note: "" });
+    return structuredClone(mockProfile);
+  }
+  return invoke<Profile>("add_window_rule", { window, mode });
+}
+
+export async function protectAll(mode: ProtectionMode): Promise<Profile> {
+  if (!IN_TAURI) {
+    mockExplicitArmed = true;
+    for (const window of mockWindows()) {
+      const existing = mockProfile.rules.find((rule) => ruleMatchesWindow(rule, window));
+      if (existing) {
+        existing.enabled = true;
+      } else {
+        mockProfile.rules.push({
+          id: mockNextRule++,
+          target: { kind: "app", value: window.app },
+          mode,
+          enabled: true,
+          note: "",
+        });
+      }
+    }
+    return structuredClone(mockProfile);
+  }
+  return invoke<Profile>("protect_all", { mode });
+}
+
 export async function removeAppRules(app: AppKey): Promise<Profile> {
   if (!IN_TAURI) {
     mockProfile.rules = mockProfile.rules.filter(
@@ -324,6 +387,24 @@ export async function removeAppRules(app: AppKey): Promise<Profile> {
     return structuredClone(mockProfile);
   }
   return invoke<Profile>("remove_app_rules", { app });
+}
+
+export async function removeWindowRules(window: number): Promise<Profile> {
+  if (!IN_TAURI) {
+    mockProfile.rules = mockProfile.rules.filter(
+      (rule) => !(rule.target.kind === "window" && rule.target.value === window),
+    );
+    return structuredClone(mockProfile);
+  }
+  return invoke<Profile>("remove_window_rules", { window });
+}
+
+export async function removeRule(id: number): Promise<Profile> {
+  if (!IN_TAURI) {
+    mockProfile.rules = mockProfile.rules.filter((rule) => rule.id !== id);
+    return structuredClone(mockProfile);
+  }
+  return invoke<Profile>("remove_rule", { id });
 }
 
 export async function setRuleMode(id: number, mode: ProtectionMode): Promise<Profile> {
@@ -346,6 +427,7 @@ export async function setRuleEnabled(id: number, enabled: boolean): Promise<Prof
 
 export async function resetProfile(): Promise<Profile> {
   if (!IN_TAURI) {
+    mockExplicitArmed = false;
     mockProfile = { version: 1, rules: [], surface: {}, auto_arm: "off" };
     return structuredClone(mockProfile);
   }
@@ -359,8 +441,10 @@ export async function tick(): Promise<TickReport> {
 
 export async function releaseAll(): Promise<{ released: number; failed: string[] }> {
   if (!IN_TAURI) {
-    mockProfile.rules = [];
-    return { released: mockApplied().length, failed: [] };
+    const released = mockApplied().length;
+    mockExplicitArmed = false;
+    mockProfile.auto_arm = "off";
+    return { released, failed: [] };
   }
   return invoke<{ released: number; failed: string[] }>("release_all");
 }
@@ -370,10 +454,6 @@ export async function preview(): Promise<SurfacePreview> {
   return invoke<SurfacePreview>("preview");
 }
 
-/// Open the clean, shareable Surface window.
-///
-/// In a browser preview this opens a second tab with `?surface=1`, which uses
-/// the same mock compositor. In Tauri the Rust side creates a second webview.
 export async function openSurface(): Promise<void> {
   if (!IN_TAURI) {
     window.open(

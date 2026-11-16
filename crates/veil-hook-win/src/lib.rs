@@ -6,27 +6,81 @@
 //! is set and cleared by the main application, so per-window control works
 //! without any IPC channel.
 //!
-//! This is a compile-gated Phase 0 spike: it must be built with the MSVC
-//! toolchain and tested against Defender/EDR before it ships.
+//! Carefully avoids two classic Win32 pitfalls:
+//! 1. Uses raw Win32 `CreateThread` + `DisableThreadLibraryCalls` in `DllMain`
+//!    instead of `std::thread::spawn`, avoiding loader-lock deadlocks.
+//! 2. Queries `GetWindowDisplayAffinity` before calling `SetWindowDisplayAffinity`
+//!    so DWM redirection surfaces are not recreated on every poll tick.
 
 #![cfg(windows)]
 #![allow(unsafe_code)]
 
 use std::time::Duration;
 
-use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, TRUE};
-use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+use windows_sys::Win32::Foundation::{CloseHandle, BOOL, HANDLE, HMODULE, HWND, LPARAM, TRUE};
+use windows_sys::Win32::System::LibraryLoader::DisableThreadLibraryCalls;
+use windows_sys::Win32::System::Threading::{CreateThread, GetCurrentProcessId};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetPropW, GetWindowThreadProcessId, IsWindow, SetWindowDisplayAffinity,
-    WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
+    EnumWindows, GetPropW, GetWindowDisplayAffinity, GetWindowThreadProcessId, IsWindow,
+    RemovePropW, SetPropW, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
 };
 
 const DLL_PROCESS_ATTACH: u32 = 1;
-const POLL_INTERVAL: Duration = Duration::from_millis(200);
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-fn protected_prop() -> Vec<u16> {
-    "OmniScreenVeil.Protected\0".encode_utf16().collect()
-}
+const PROTECTED_PROP_UTF16: &[u16] = &[
+    b'O' as u16,
+    b'm' as u16,
+    b'n' as u16,
+    b'i' as u16,
+    b'S' as u16,
+    b'c' as u16,
+    b'r' as u16,
+    b'e' as u16,
+    b'e' as u16,
+    b'n' as u16,
+    b'V' as u16,
+    b'e' as u16,
+    b'i' as u16,
+    b'l' as u16,
+    b'.' as u16,
+    b'P' as u16,
+    b'r' as u16,
+    b'o' as u16,
+    b't' as u16,
+    b'e' as u16,
+    b'c' as u16,
+    b't' as u16,
+    b'e' as u16,
+    b'd' as u16,
+    0,
+];
+
+const APPLIED_PROP_UTF16: &[u16] = &[
+    b'O' as u16,
+    b'm' as u16,
+    b'n' as u16,
+    b'i' as u16,
+    b'S' as u16,
+    b'c' as u16,
+    b'r' as u16,
+    b'e' as u16,
+    b'e' as u16,
+    b'n' as u16,
+    b'V' as u16,
+    b'e' as u16,
+    b'i' as u16,
+    b'l' as u16,
+    b'.' as u16,
+    b'A' as u16,
+    b'p' as u16,
+    b'p' as u16,
+    b'l' as u16,
+    b'i' as u16,
+    b'e' as u16,
+    b'd' as u16,
+    0,
+];
 
 struct Context {
     prop: *const u16,
@@ -43,26 +97,35 @@ unsafe extern "system" fn collect_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
     TRUE
 }
 
-fn poll_loop() {
-    let prop = protected_prop();
+unsafe fn ensure_affinity(hwnd: HWND, desired: u32) -> bool {
+    let mut current = 0u32;
+    if GetWindowDisplayAffinity(hwnd, &mut current) != 0 && current == desired {
+        return true;
+    }
+    SetWindowDisplayAffinity(hwnd, desired) != 0
+}
+
+unsafe extern "system" fn worker_thread(_param: *mut core::ffi::c_void) -> u32 {
     let mut tracked: Vec<usize> = Vec::new();
     loop {
         let mut found: Vec<usize> = Vec::new();
         let mut ctx = Context {
-            prop: prop.as_ptr(),
+            prop: PROTECTED_PROP_UTF16.as_ptr(),
             out: &mut found,
         };
-        unsafe {
-            EnumWindows(Some(collect_cb), &mut ctx as *mut _ as LPARAM);
-        }
-        for hwnd in &found {
-            unsafe {
-                SetWindowDisplayAffinity(*hwnd as HWND, WDA_EXCLUDEFROMCAPTURE);
+        EnumWindows(Some(collect_cb), &mut ctx as *mut _ as LPARAM);
+
+        for &hwnd_val in &found {
+            let hwnd = hwnd_val as HWND;
+            if ensure_affinity(hwnd, WDA_EXCLUDEFROMCAPTURE) {
+                let _ = SetPropW(hwnd, APPLIED_PROP_UTF16.as_ptr(), 1 as HANDLE);
             }
         }
-        for stale in tracked.iter().filter(|h| !found.contains(h)) {
-            unsafe {
-                SetWindowDisplayAffinity(*stale as HWND, WDA_NONE);
+        for &stale_val in tracked.iter().filter(|h| !found.contains(h)) {
+            let stale = stale_val as HWND;
+            if IsWindow(stale) != 0 {
+                let _ = ensure_affinity(stale, WDA_NONE);
+                let _ = RemovePropW(stale, APPLIED_PROP_UTF16.as_ptr());
             }
         }
         tracked = found;
@@ -72,15 +135,25 @@ fn poll_loop() {
 
 #[no_mangle]
 pub extern "system" fn DllMain(
-    _instance: *mut core::ffi::c_void,
+    instance: HMODULE,
     reason: u32,
     _reserved: *mut core::ffi::c_void,
 ) -> BOOL {
     if reason == DLL_PROCESS_ATTACH {
-        // Keep the thread name stable so it is obvious in Process Explorer.
-        let _ = std::thread::Builder::new()
-            .name("omniscreenveil-hook".into())
-            .spawn(poll_loop);
+        unsafe {
+            let _ = DisableThreadLibraryCalls(instance);
+            let thread = CreateThread(
+                std::ptr::null(),
+                0,
+                Some(worker_thread),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+            );
+            if !thread.is_null() {
+                CloseHandle(thread);
+            }
+        }
     }
     TRUE
 }

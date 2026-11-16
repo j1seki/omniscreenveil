@@ -19,8 +19,8 @@ pretend otherwise.
 
 | Platform | Exclusion | Veil Surface | Strict hide | Notes |
 |---|---|---|---|---|
-| **Windows 10 2004+ / 11** | **native** | **native** | **native** | `WDA_EXCLUDEFROMCAPTURE` must be set in the owning process; `veil_hook_win.dll` provides that. `ShowWindow` for strict hide. |
-| **macOS 13+** | **unsupported** — no public ScreenCaptureKit exclusion API for foreign windows | **native** | **native** | ScreenCaptureKit capture for the Surface; Accessibility `AXHidden` for strict hide. Both need user consent. |
+| **Windows 10 2004+ / 11** | **partial / experimental** | **partial / experimental** | **partial / experimental** | Helper injection and GDI capture require native runtime validation. Test the actual capture application. |
+| **macOS 14+** | **unsupported** — no public ScreenCaptureKit exclusion API for foreign windows | **partial / experimental** | **partial / experimental** | ScreenCaptureKit and Accessibility require consent and native runtime validation. |
 | **Linux / X11** | **unsupported** — needs a privileged Xorg XACE module | **native** | **native** | Root-window capture + `XGetGeometry` inventory; `XUnmapWindow` strict hide. |
 | **Linux / Wayland** | **unsupported** — compositors do not expose per-window capture exclusion | **partial** — sway/Hyprland: wlr-screencopy capture + IPC geometry; GNOME/KDE: portal mirror fallback | **partial** — sway/Hyprland IPC moves the window off-screen; GNOME Shell and KDE Plasma need a desktop extension | Per-window exclusion remains impossible. Capture uses `grim` (wlr-screencopy); no private compositor patches. |
 
@@ -46,7 +46,7 @@ pretend otherwise.
 | Windows Exclusion | Pixel test: canary visible before arming, absent after `WDA_EXCLUDEFROMCAPTURE` is applied, restored on release, while the window remains `IsWindowVisible`. |
 | Windows strict hide | `ShowWindow(SW_HIDE)` removes the canary from a desktop capture; `SW_SHOW` restores it. |
 | macOS Surface | ScreenCaptureKit capture with the window's rectangle masked by the compositor; canary absent. |
-| macOS strict hide | Accessibility `AXHidden` removes the window from the capture and `AXHidden=false` restores it; requires consented permission. |
+| macOS strict hide | Accessibility `AXMinimized` removes the window from the capture and `AXMinimized=false` restores it; requires consented permission. |
 | X11 Surface | `crates/veil-protect-linux/tests/x11_end_to_end.rs`: canary present in root capture, removed by `SurfacePlan`, strict hide removes it, remap restores it. |
 | X11 strict hide | Same test, using `XUnmapWindow` / `XMapWindow`. |
 | Wayland Surface | Phase 1 on sway/Hyprland: `grim` capture + `swaymsg`/`hyprctl` geometry, masked by the Surface, same canary harness. GNOME/KDE report partial until a provider ships. |

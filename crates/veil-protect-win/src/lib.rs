@@ -1,20 +1,17 @@
-//! Windows backend (Phase 0).
+//! Windows backend.
 //!
-//! Two mechanisms, matching the capability matrix:
+//! Three mechanisms, matching the capability matrix:
 //!
-//! * `Exclusion` — inject `veil_hook_win.dll` into the target process and mark
-//!   the chosen windows with a window property. The helper applies
-//!   `WDA_EXCLUDEFROMCAPTURE` from *inside* the owning process, which Windows
-//!   requires. Injection is deliberately scoped: only processes the user
-//!   selected, no persistence, no service.
-//! * `StrictHide` — `ShowWindow(SW_HIDE)` / `SW_SHOW`, tracked so the window is
-//!   restored even after a crash of the UI (the helper keeps no state).
+//! * `Exclusion` — loads `veil_hook_win.dll` into the target process and waits
+//!   for `GetWindowDisplayAffinity` to confirm the requested setting. This
+//!   setting is not proof that every capture path respects it.
+//! * `Surface` — live desktop capture via GDI `BitBlt` with protected windows
+//!   and our own windows masked by the `veil-surface` compositor.
+//! * `StrictHide` — `ShowWindow(SW_HIDE)` / `SW_SHOW`, tracked in-process and
+//!   preserved across inventory scans so reconcile never flickers.
 //!
-//! `Surface` is a no-op at the OS level: the compositor masks the window in the
-//! shared surface.
-//!
-//! Everything in this file is compile-gated to Windows. The pure helpers at the
-//! bottom are tested on every host.
+//! Everything Win32-specific is compile-gated to Windows; the pure helpers at
+//! the bottom are unit-tested on every host.
 
 #![cfg_attr(windows, allow(unsafe_code))]
 
@@ -65,6 +62,31 @@ impl WinBackend {
             Err(WinError::NotWindows)
         }
     }
+
+    /// Capture the live Windows desktop as a BGRA frame for the Veil Surface.
+    pub fn capture_root(&self) -> Result<veil_surface::Frame, WinError> {
+        #[cfg(windows)]
+        {
+            self.inner.capture_root()
+        }
+        #[cfg(not(windows))]
+        {
+            Err(WinError::NotWindows)
+        }
+    }
+
+    /// Bounds of every window owned by this process so the Veil Surface masks
+    /// its own control and preview windows and never recurses.
+    pub fn own_windows(&self) -> Vec<veil_core::Rect> {
+        #[cfg(windows)]
+        {
+            self.inner.own_windows()
+        }
+        #[cfg(not(windows))]
+        {
+            Vec::new()
+        }
+    }
 }
 
 impl ProtectionBackend for WinBackend {
@@ -104,7 +126,7 @@ impl ProtectionBackend for WinBackend {
     }
 
     fn describe(&self) -> String {
-        "Windows backend (display affinity + strict hide)".to_string()
+        "Windows backend (display affinity + GDI surface + strict hide)".to_string()
     }
 }
 
@@ -119,6 +141,22 @@ pub fn normalize_exe(path: &str) -> String {
     path.replace('\\', "/").to_ascii_lowercase()
 }
 
+/// Filter predicate for Win32 class names that belong to desktop shell chrome
+/// rather than user applications.
+pub fn is_shell_class(class_name: &str) -> bool {
+    matches!(
+        class_name,
+        "Progman"
+            | "WorkerW"
+            | "Shell_TrayWnd"
+            | "Shell_SecondaryTrayWnd"
+            | "NotifyIconOverflowWindow"
+            | "Windows.UI.Core.CoreWindow"
+            | "IME"
+            | "MSCTFIME UI"
+    )
+}
+
 #[cfg(windows)]
 mod win {
     use super::*;
@@ -126,13 +164,21 @@ mod win {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
     use std::path::PathBuf;
+    use std::time::{Duration, Instant};
 
     use windows_sys::Win32::Foundation::{
-        CloseHandle, GetLastError, BOOL, HANDLE, HWND, LPARAM, RECT, TRUE, WAIT_OBJECT_0,
+        CloseHandle, GetLastError, BOOL, HANDLE, HWND, LPARAM, LUID, RECT, TRUE, WAIT_OBJECT_0,
+    };
+    use windows_sys::Win32::Graphics::Dwm::{
+        DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
     };
     use windows_sys::Win32::Graphics::Gdi::{
         BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, GetObjectW,
         ReleaseDC, SelectObject, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, SRCCOPY,
+    };
+    use windows_sys::Win32::Security::{
+        AdjustTokenPrivileges, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
+        TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
     };
     use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
     use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
@@ -140,22 +186,27 @@ mod win {
         VirtualAllocEx, VirtualFreeEx, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
     };
     use windows_sys::Win32::System::Threading::{
-        CreateRemoteThread, GetCurrentProcessId, GetExitCodeThread, OpenProcess,
-        QueryFullProcessImageNameW, WaitForSingleObject, LPTHREAD_START_ROUTINE,
+        CreateRemoteThread, GetCurrentProcess, GetCurrentProcessId, GetExitCodeThread, OpenProcess,
+        OpenProcessToken, QueryFullProcessImageNameW, WaitForSingleObject, LPTHREAD_START_ROUTINE,
         PROCESS_CREATE_THREAD, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_OPERATION,
         PROCESS_VM_WRITE,
     };
     use windows_sys::Win32::UI::Shell::ExtractAssociatedIconW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DestroyIcon, EnumWindows, GetIconInfo, GetWindowLongW, GetWindowRect, GetWindowTextW,
-        GetWindowThreadProcessId, IsIconic, IsWindowVisible, RemovePropW, SetPropW, ShowWindow,
-        GWL_EXSTYLE, HICON, ICONINFO, SW_HIDE, SW_SHOW, WS_EX_TOOLWINDOW,
+        DestroyIcon, EnumChildWindows, EnumWindows, GetClassNameW, GetIconInfo, GetSystemMetrics,
+        GetWindow, GetWindowDisplayAffinity, GetWindowLongW, GetWindowRect, GetWindowTextW,
+        GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, RemovePropW, SetPropW,
+        SetWindowDisplayAffinity, ShowWindow, GWL_EXSTYLE, GW_OWNER, HICON, ICONINFO, SM_CXSCREEN,
+        SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+        SW_HIDE, SW_SHOW, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW,
     };
 
     use veil_core::geometry::Rect;
     use veil_core::ids::AppKey;
     use veil_core::window::WindowInfo;
     use veil_core::ProtectionMode;
+    use veil_surface::{Frame, PixelFormat};
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -166,6 +217,131 @@ mod win {
             call,
             code: unsafe { GetLastError() },
         }
+    }
+
+    /// Best-effort enable `SeDebugPrivilege` on the current process token so
+    /// when the user runs OmniScreenVeil as Administrator it can protect
+    /// elevated windows as well.
+    fn enable_debug_privilege() {
+        unsafe {
+            let mut token: HANDLE = std::ptr::null_mut();
+            if OpenProcessToken(
+                GetCurrentProcess(),
+                TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+                &mut token,
+            ) == 0
+            {
+                return;
+            }
+            let mut luid = LUID {
+                LowPart: 0,
+                HighPart: 0,
+            };
+            let priv_name = wide("SeDebugPrivilege");
+            if LookupPrivilegeValueW(std::ptr::null(), priv_name.as_ptr(), &mut luid) != 0 {
+                let mut tp = TOKEN_PRIVILEGES {
+                    PrivilegeCount: 1,
+                    Privileges: [windows_sys::Win32::Security::LUID_AND_ATTRIBUTES {
+                        Luid: luid,
+                        Attributes: SE_PRIVILEGE_ENABLED,
+                    }],
+                };
+                let _ = AdjustTokenPrivileges(
+                    token,
+                    0,
+                    &mut tp,
+                    std::mem::size_of::<TOKEN_PRIVILEGES>() as u32,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                );
+            }
+            CloseHandle(token);
+        }
+    }
+
+    unsafe fn is_window_cloaked(hwnd: HWND) -> bool {
+        let mut cloaked: u32 = 0;
+        let hr = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED as u32,
+            &mut cloaked as *mut _ as *mut _,
+            std::mem::size_of::<u32>() as u32,
+        );
+        hr == 0 && cloaked != 0
+    }
+
+    unsafe fn window_class_name(hwnd: HWND) -> String {
+        let mut buf = [0u16; 256];
+        let len = GetClassNameW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+        if len > 0 {
+            String::from_utf16_lossy(&buf[..len as usize])
+        } else {
+            String::new()
+        }
+    }
+
+    unsafe fn window_title(hwnd: HWND) -> String {
+        let mut title_buf = [0u16; 512];
+        let len = GetWindowTextW(hwnd, title_buf.as_mut_ptr(), title_buf.len() as i32);
+        if len > 0 {
+            String::from_utf16_lossy(&title_buf[..len as usize])
+        } else {
+            String::new()
+        }
+    }
+
+    unsafe fn window_visible_bounds(hwnd: HWND) -> Option<Rect> {
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        let is_min = IsIconic(hwnd) != 0;
+        if !is_min {
+            let hr = DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_EXTENDED_FRAME_BOUNDS as u32,
+                &mut rect as *mut _ as *mut _,
+                std::mem::size_of::<RECT>() as u32,
+            );
+            if hr != 0 && GetWindowRect(hwnd, &mut rect) == 0 {
+                return None;
+            }
+        } else if GetWindowRect(hwnd, &mut rect) == 0 {
+            return None;
+        }
+        let w = (rect.right - rect.left).max(0) as u32;
+        let h = (rect.bottom - rect.top).max(0) as u32;
+        if !is_min && (w < 32 || h < 32) {
+            return None;
+        }
+        Some(Rect::new(rect.left, rect.top, w.max(32), h.max(32)))
+    }
+
+    /// For UWP windows hosted inside `ApplicationFrameHost.exe`, find the real
+    /// child `CoreWindow` process ID so the app name and icon match the UWP app.
+    unsafe fn resolve_uwp_child_pid(frame_hwnd: HWND, frame_pid: u32) -> u32 {
+        struct ChildCtx {
+            frame_pid: u32,
+            resolved_pid: u32,
+        }
+        unsafe extern "system" fn child_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            let ctx = &mut *(lparam as *mut ChildCtx);
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if pid != 0 && pid != ctx.frame_pid {
+                ctx.resolved_pid = pid;
+                return 0;
+            }
+            TRUE
+        }
+        let mut ctx = ChildCtx {
+            frame_pid,
+            resolved_pid: frame_pid,
+        };
+        EnumChildWindows(frame_hwnd, Some(child_cb), &mut ctx as *mut _ as LPARAM);
+        ctx.resolved_pid
     }
 
     #[derive(Debug, Clone)]
@@ -180,8 +356,25 @@ mod win {
 
     unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let out = &mut *(lparam as *mut Vec<RawWindow>);
+        if IsWindowVisible(hwnd) == 0 {
+            return TRUE;
+        }
+        if is_window_cloaked(hwnd) {
+            return TRUE;
+        }
         let exstyle = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-        if exstyle & WS_EX_TOOLWINDOW != 0 {
+        let is_app_window = (exstyle & WS_EX_APPWINDOW) != 0;
+        if (exstyle & WS_EX_TOOLWINDOW) != 0 && !is_app_window {
+            return TRUE;
+        }
+        if (exstyle & WS_EX_NOACTIVATE) != 0 && !is_app_window {
+            return TRUE;
+        }
+        if !GetWindow(hwnd, GW_OWNER).is_null() && !is_app_window {
+            return TRUE;
+        }
+        let class_name = window_class_name(hwnd);
+        if is_shell_class(&class_name) {
             return TRUE;
         }
         let mut pid = 0u32;
@@ -189,33 +382,22 @@ mod win {
         if pid == 0 || pid == GetCurrentProcessId() {
             return TRUE;
         }
-        let mut rect = RECT {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
-        };
-        if GetWindowRect(hwnd, &mut rect) == 0 {
+        let title = window_title(hwnd);
+        if title.trim().is_empty() {
             return TRUE;
         }
-        let w = (rect.right - rect.left).max(0) as u32;
-        let h = (rect.bottom - rect.top).max(0) as u32;
-        if w == 0 || h == 0 {
+        let Some(bounds) = window_visible_bounds(hwnd) else {
             return TRUE;
-        }
-        let mut title_buf = [0u16; 512];
-        let len = GetWindowTextW(hwnd, title_buf.as_mut_ptr(), title_buf.len() as i32);
-        let title = if len > 0 {
-            String::from_utf16_lossy(&title_buf[..len as usize])
-        } else {
-            String::new()
         };
+        if class_name == "ApplicationFrameWindow" {
+            pid = resolve_uwp_child_pid(hwnd, pid);
+        }
         out.push(RawWindow {
             hwnd,
             pid,
             title,
-            bounds: Rect::new(rect.left, rect.top, w, h),
-            visible: IsWindowVisible(hwnd) != 0,
+            bounds,
+            visible: true,
             minimized: IsIconic(hwnd) != 0,
         });
         TRUE
@@ -229,7 +411,6 @@ mod win {
             encoder.set_color(png::ColorType::Rgba);
             encoder.set_depth(png::BitDepth::Eight);
             let mut writer = encoder.write_header().ok()?;
-            // PNG is RGBA; the source is BGRA, so swap the colour channels.
             let mut rgba = Vec::with_capacity(pixels.len());
             for px in pixels.chunks_exact(4) {
                 rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
@@ -240,8 +421,6 @@ mod win {
         Some(base64::engine::general_purpose::STANDARD.encode(buf))
     }
 
-    /// Extract the app icon for an executable as a base64 PNG, or empty when
-    /// the OS cannot provide one.
     fn app_icon(path: &str) -> String {
         exe_icon(path)
             .and_then(|(pixels, w, h)| bgra_to_png_base64(&pixels, w, h))
@@ -266,9 +445,6 @@ mod win {
         }
     }
 
-    /// Extract the first icon from an executable as a 32-bit BGRA buffer plus
-    /// its dimensions. `ExtractAssociatedIconW` returns the small icon, which
-    /// is what a window list should show.
     fn exe_icon(path: &str) -> Option<(Vec<u8>, u32, u32)> {
         unsafe {
             let mut wide = wide(path);
@@ -277,14 +453,12 @@ mod win {
             if icon.is_null() {
                 return None;
             }
-            let (pixels, w, h) = icon_to_bgra(icon)?;
+            let converted = icon_to_bgra(icon);
             DestroyIcon(icon);
-            Some((pixels, w, h))
+            converted
         }
     }
 
-    /// Read an icon handle into a 32-bit BGRA pixel buffer. The caller owns
-    /// `info.hbmMask` / `info.hbmColor` and must delete them.
     unsafe fn icon_to_bgra(icon: HICON) -> Option<(Vec<u8>, u32, u32)> {
         let mut info = ICONINFO {
             fIcon: 0,
@@ -299,6 +473,9 @@ mod win {
 
         let result = (|| {
             let bitmap = info.hbmColor;
+            if bitmap.is_null() {
+                return None;
+            }
             let mut bmp: BITMAP = std::mem::zeroed();
             if GetObjectW(
                 bitmap as *mut _,
@@ -331,7 +508,6 @@ mod win {
                 return None;
             }
 
-            // A DIB section gives us directly addressable 32-bit pixels.
             let header = BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
                 biWidth: w,
@@ -358,7 +534,6 @@ mod win {
                 return None;
             }
 
-            // Select the icon's colour bitmap, then blit it into the DIB.
             let old_icon = SelectObject(icon_dc, bitmap as *mut _);
             let old_dib = SelectObject(dc, dib as *mut _);
             let ok = BitBlt(dc, 0, 0, w, h, icon_dc, 0, 0, SRCCOPY);
@@ -388,14 +563,31 @@ mod win {
         result
     }
 
+    /// Virtual desktop rectangle `(origin_x, origin_y, width, height)`.
+    unsafe fn virtual_screen_rect() -> (i32, i32, u32, u32) {
+        let vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        let vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        let vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        if vw > 0 && vh > 0 {
+            (vx, vy, vw as u32, vh as u32)
+        } else {
+            let sw = GetSystemMetrics(SM_CXSCREEN).max(1280) as u32;
+            let sh = GetSystemMetrics(SM_CYSCREEN).max(720) as u32;
+            (0, 0, sw, sh)
+        }
+    }
+
     pub struct Inner {
         injected: BTreeSet<u32>,
-        /// window -> (pid, mode) so release knows what to undo.
+        /// window -> (pid, mode) so release knows what to undo and strict-hidden
+        /// windows stay in the inventory.
         protected: BTreeMap<WindowId, (u32, ProtectionMode)>,
     }
 
     impl Inner {
         pub fn new() -> Result<Self, WinError> {
+            enable_debug_privilege();
             Ok(Self {
                 injected: BTreeSet::new(),
                 protected: BTreeMap::new(),
@@ -403,10 +595,41 @@ mod win {
         }
 
         pub fn list_windows(&self) -> Result<Vec<WindowInfo>, WinError> {
+            let (vx, vy, _, _) = unsafe { virtual_screen_rect() };
             let mut raw: Vec<RawWindow> = Vec::new();
             unsafe {
                 EnumWindows(Some(enum_cb), &mut raw as *mut _ as LPARAM);
             }
+
+            // Keep windows we hid via `StrictHide` in the inventory even though
+            // `IsWindowVisible` is now false for them; otherwise reconcile
+            // would think the window closed and immediately release/re-show it!
+            for (&win_id, &(pid, mode)) in &self.protected {
+                if mode != ProtectionMode::StrictHide {
+                    continue;
+                }
+                if raw.iter().any(|w| w.hwnd as usize as u64 == win_id.0) {
+                    continue;
+                }
+                let hwnd = win_id.0 as usize as HWND;
+                unsafe {
+                    if IsWindow(hwnd) == 0 {
+                        continue;
+                    }
+                    let title = window_title(hwnd);
+                    let bounds =
+                        window_visible_bounds(hwnd).unwrap_or_else(|| Rect::new(0, 0, 400, 300));
+                    raw.push(RawWindow {
+                        hwnd,
+                        pid,
+                        title,
+                        bounds,
+                        visible: false,
+                        minimized: IsIconic(hwnd) != 0,
+                    });
+                }
+            }
+
             let mut exe_cache: BTreeMap<u32, String> = BTreeMap::new();
             let mut icon_cache: BTreeMap<u32, String> = BTreeMap::new();
             let mut out = Vec::with_capacity(raw.len());
@@ -427,14 +650,21 @@ mod win {
                     .next()
                     .unwrap_or(&exe)
                     .trim_end_matches(".exe")
+                    .trim_end_matches(".EXE")
                     .to_string();
+                let bounds = Rect::new(
+                    window.bounds.x - vx,
+                    window.bounds.y - vy,
+                    window.bounds.w,
+                    window.bounds.h,
+                );
                 out.push(WindowInfo {
                     id: WindowId(window.hwnd as usize as u64),
                     app: AppKey::WindowsExecutable(normalize_exe(&exe)),
                     app_name,
                     title: window.title,
                     pid: window.pid,
-                    bounds: window.bounds,
+                    bounds,
                     monitor: None,
                     visible: window.visible,
                     minimized: window.minimized,
@@ -443,16 +673,168 @@ mod win {
                     icon,
                 });
             }
+            out.sort_by_key(|w| w.id);
             Ok(out)
         }
 
+        pub fn own_windows(&self) -> Vec<Rect> {
+            unsafe extern "system" fn own_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+                let out = &mut *(lparam as *mut Vec<Rect>);
+                if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 {
+                    return TRUE;
+                }
+                let mut pid = 0u32;
+                GetWindowThreadProcessId(hwnd, &mut pid);
+                if pid != GetCurrentProcessId() {
+                    return TRUE;
+                }
+                if let Some(bounds) = window_visible_bounds(hwnd) {
+                    out.push(bounds);
+                }
+                TRUE
+            }
+            let (vx, vy, _, _) = unsafe { virtual_screen_rect() };
+            let mut raw: Vec<Rect> = Vec::new();
+            unsafe {
+                EnumWindows(Some(own_cb), &mut raw as *mut _ as LPARAM);
+            }
+            raw.into_iter()
+                .map(|r| Rect::new(r.x - vx, r.y - vy, r.w, r.h))
+                .collect()
+        }
+
+        pub fn capture_root(&self) -> Result<Frame, WinError> {
+            unsafe {
+                let (vx, vy, width, height) = virtual_screen_rect();
+                let screen_dc = GetDC(std::ptr::null_mut());
+                if screen_dc.is_null() {
+                    return Err(last_error("GetDC(NULL)"));
+                }
+                let mem_dc = CreateCompatibleDC(screen_dc);
+                if mem_dc.is_null() {
+                    ReleaseDC(std::ptr::null_mut(), screen_dc);
+                    return Err(last_error("CreateCompatibleDC"));
+                }
+
+                let header = BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width as i32,
+                    biHeight: -(height as i32), // top-down DIB
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: 0,
+                    biSizeImage: 0,
+                    biXPelsPerMeter: 0,
+                    biYPelsPerMeter: 0,
+                    biClrUsed: 0,
+                    biClrImportant: 0,
+                };
+                let bmi = BITMAPINFO {
+                    bmiHeader: header,
+                    bmiColors: [std::mem::zeroed(); 1],
+                };
+                let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+                let dib = CreateDIBSection(
+                    mem_dc,
+                    &bmi,
+                    DIB_RGB_COLORS,
+                    &mut bits,
+                    std::ptr::null_mut(),
+                    0,
+                );
+                if dib.is_null() || bits.is_null() {
+                    DeleteDC(mem_dc);
+                    ReleaseDC(std::ptr::null_mut(), screen_dc);
+                    return Err(last_error("CreateDIBSection"));
+                }
+
+                let old = SelectObject(mem_dc, dib as *mut _);
+                let ok = BitBlt(
+                    mem_dc,
+                    0,
+                    0,
+                    width as i32,
+                    height as i32,
+                    screen_dc,
+                    vx,
+                    vy,
+                    SRCCOPY,
+                );
+                SelectObject(mem_dc, old);
+                DeleteDC(mem_dc);
+                ReleaseDC(std::ptr::null_mut(), screen_dc);
+
+                if ok == 0 {
+                    DeleteObject(dib as *mut _);
+                    return Err(last_error("BitBlt"));
+                }
+
+                let len = width as usize * height as usize * 4;
+                let mut pixels = vec![0u8; len];
+                std::ptr::copy_nonoverlapping(bits as *const u8, pixels.as_mut_ptr(), len);
+                DeleteObject(dib as *mut _);
+
+                for px in pixels.chunks_exact_mut(4) {
+                    px[3] = 255;
+                }
+                Frame::from_bytes(width, height, PixelFormat::Bgra8, pixels)
+                    .map_err(|e| WinError::Other(e.to_string()))
+            }
+        }
+
         fn hook_dll_path(&self) -> Result<PathBuf, WinError> {
-            if let Some(path) = std::env::var_os("OMV_HOOK_DLL") {
-                return Ok(PathBuf::from(path));
+            if let Some(path) = std::env::var_os("OMNISCREENVEIL_HOOK_DLL")
+                .or_else(|| std::env::var_os("OMV_HOOK_DLL"))
+            {
+                let p = PathBuf::from(path);
+                if p.is_file() {
+                    return Ok(p);
+                }
             }
             let exe = std::env::current_exe()
                 .map_err(|e| WinError::Other(format!("cannot find own executable: {e}")))?;
-            Ok(exe.with_file_name(HOOK_DLL_NAME))
+            let exe_dir = exe
+                .parent()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+
+            let candidates = [
+                exe.with_file_name(HOOK_DLL_NAME),
+                exe_dir.join("resources").join(HOOK_DLL_NAME),
+                exe_dir.join("..").join("release").join(HOOK_DLL_NAME),
+                exe_dir.join("..").join("debug").join(HOOK_DLL_NAME),
+                exe_dir
+                    .join("..")
+                    .join("..")
+                    .join("release")
+                    .join(HOOK_DLL_NAME),
+                exe_dir
+                    .join("..")
+                    .join("..")
+                    .join("..")
+                    .join("target")
+                    .join("release")
+                    .join(HOOK_DLL_NAME),
+                exe_dir
+                    .join("..")
+                    .join("..")
+                    .join("..")
+                    .join("target")
+                    .join("x86_64-pc-windows-msvc")
+                    .join("release")
+                    .join(HOOK_DLL_NAME),
+            ];
+            for candidate in &candidates {
+                if let Ok(meta) = std::fs::metadata(candidate) {
+                    if meta.is_file() && meta.len() > 0 {
+                        return Ok(candidate.clone());
+                    }
+                }
+            }
+            Err(WinError::Other(format!(
+                "exclusion helper {HOOK_DLL_NAME} not found next to {}",
+                exe.display()
+            )))
         }
 
         fn ensure_injected(&mut self, pid: u32) -> Result<(), WinError> {
@@ -471,7 +853,16 @@ mod win {
                     pid,
                 );
                 if process.is_null() {
-                    return Err(last_error("OpenProcess"));
+                    let code = GetLastError();
+                    if code == 5 {
+                        return Err(WinError::Other(format!(
+                            "Access denied opening PID {pid} (error 5) — run OmniScreenVeil as Administrator or use Veil Surface mode."
+                        )));
+                    }
+                    return Err(WinError::Win32 {
+                        call: "OpenProcess",
+                        code,
+                    });
                 }
                 let bytes = dll_w.len() * 2;
                 let remote = VirtualAllocEx(
@@ -530,14 +921,19 @@ mod win {
                 let mut exit_code = 0u32;
                 let _ = GetExitCodeThread(thread, &mut exit_code);
                 CloseHandle(thread);
-                VirtualFreeEx(process, remote, 0, MEM_RELEASE);
+                // A timed-out remote thread may still be reading this buffer.
+                // Leave it allocated in that case rather than causing a use-after-free.
+                if wait == WAIT_OBJECT_0 {
+                    VirtualFreeEx(process, remote, 0, MEM_RELEASE);
+                }
                 CloseHandle(process);
                 if wait != WAIT_OBJECT_0 {
                     return Err(WinError::Other("injection timed out".into()));
                 }
                 if exit_code == 0 {
                     return Err(WinError::Other(
-                        "LoadLibraryW failed in the target process (architecture mismatch?)".into(),
+                        "LoadLibraryW was blocked in target process (ACG / signature policy)"
+                            .into(),
                     ));
                 }
                 self.injected.insert(pid);
@@ -545,25 +941,75 @@ mod win {
             }
         }
 
+        unsafe fn verify_affinity(hwnd: HWND, expected: u32, timeout: Duration) -> bool {
+            let deadline = Instant::now() + timeout;
+            loop {
+                let mut actual = 0u32;
+                if GetWindowDisplayAffinity(hwnd, &mut actual) != 0 && actual == expected {
+                    return true;
+                }
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(15));
+            }
+        }
+
         pub fn apply(&mut self, intent: &ProtectionIntent) -> Result<(), WinError> {
             let hwnd = intent.window.0 as usize as HWND;
+            unsafe {
+                if IsWindow(hwnd) == 0 {
+                    return Err(WinError::Other(format!(
+                        "window {} no longer exists",
+                        intent.window
+                    )));
+                }
+            }
             match intent.mode {
                 ProtectionMode::Surface => {
                     self.protected
                         .insert(intent.window, (intent.pid, ProtectionMode::Surface));
                     Ok(())
                 }
-                ProtectionMode::Exclusion => {
-                    self.ensure_injected(intent.pid)?;
-                    let prop = wide(PROTECTED_PROP);
-                    let ok = unsafe { SetPropW(hwnd, prop.as_ptr(), 1 as HANDLE) };
-                    if ok == 0 {
-                        return Err(last_error("SetPropW"));
+                ProtectionMode::Exclusion => unsafe {
+                    // Always query the actual process ID that owns the top-level
+                    // HWND (e.g. ApplicationFrameHost.exe for UWP windows).
+                    let mut owner_pid = 0u32;
+                    GetWindowThreadProcessId(hwnd, &mut owner_pid);
+                    if owner_pid == 0 {
+                        owner_pid = intent.pid;
                     }
-                    self.protected
-                        .insert(intent.window, (intent.pid, ProtectionMode::Exclusion));
-                    Ok(())
-                }
+
+                    if owner_pid == GetCurrentProcessId() {
+                        if SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) == 0 {
+                            return Err(last_error("SetWindowDisplayAffinity"));
+                        }
+                        self.protected
+                            .insert(intent.window, (owner_pid, ProtectionMode::Exclusion));
+                        return Ok(());
+                    }
+
+                    // Mark the window property first so `veil_hook_win.dll` sees
+                    // it on its very first poll pass.
+                    let prop = wide(PROTECTED_PROP);
+                    let _ = SetPropW(hwnd, prop.as_ptr(), 1 as HANDLE);
+
+                    // Loading the helper does not establish protection until the
+                    // owning process actually applies display affinity.
+                    if let Err(err) = self.ensure_injected(owner_pid) {
+                        let _ = RemovePropW(hwnd, prop.as_ptr());
+                        return Err(err);
+                    }
+                    if Self::verify_affinity(hwnd, WDA_EXCLUDEFROMCAPTURE, Duration::from_secs(2)) {
+                        self.protected
+                            .insert(intent.window, (owner_pid, ProtectionMode::Exclusion));
+                        return Ok(());
+                    }
+                    let _ = RemovePropW(hwnd, prop.as_ptr());
+                    Err(WinError::Other(
+                        "SetWindowDisplayAffinity was rejected by the target window".into(),
+                    ))
+                },
                 ProtectionMode::StrictHide => {
                     unsafe {
                         ShowWindow(hwnd, SW_HIDE);
@@ -576,23 +1022,49 @@ mod win {
         }
 
         pub fn release(&mut self, window: WindowId) -> Result<(), WinError> {
-            let Some((_pid, mode)) = self.protected.remove(&window) else {
+            let Some(&(pid, mode)) = self.protected.get(&window) else {
                 return Ok(());
             };
             let hwnd = window.0 as usize as HWND;
             unsafe {
+                if IsWindow(hwnd) == 0 {
+                    self.protected.remove(&window);
+                    return Ok(());
+                }
                 match mode {
                     ProtectionMode::StrictHide => {
                         ShowWindow(hwnd, SW_SHOW);
                     }
                     ProtectionMode::Exclusion => {
                         let prop = wide(PROTECTED_PROP);
-                        RemovePropW(hwnd, prop.as_ptr());
+                        let _ = RemovePropW(hwnd, prop.as_ptr());
+                        let mut owner_pid = 0u32;
+                        GetWindowThreadProcessId(hwnd, &mut owner_pid);
+                        if owner_pid == 0 {
+                            owner_pid = pid;
+                        }
+                        if owner_pid == GetCurrentProcessId() {
+                            let _ = SetWindowDisplayAffinity(hwnd, WDA_NONE);
+                        } else if !Self::verify_affinity(hwnd, WDA_NONE, Duration::from_secs(2)) {
+                            return Err(WinError::Other(
+                                "Helper did not confirm exclusion was cleared".into(),
+                            ));
+                        }
                     }
                     ProtectionMode::Surface => {}
                 }
             }
+            self.protected.remove(&window);
             Ok(())
+        }
+    }
+
+    impl Drop for Inner {
+        fn drop(&mut self) {
+            let ids: Vec<WindowId> = self.protected.keys().copied().collect();
+            for id in ids {
+                let _ = self.release(id);
+            }
         }
     }
 }
@@ -613,6 +1085,15 @@ mod tests {
     fn prop_and_dll_names_are_stable() {
         assert_eq!(PROTECTED_PROP, "OmniScreenVeil.Protected");
         assert_eq!(HOOK_DLL_NAME, "veil_hook_win.dll");
+    }
+
+    #[test]
+    fn shell_classes_are_filtered() {
+        assert!(is_shell_class("Progman"));
+        assert!(is_shell_class("Shell_TrayWnd"));
+        assert!(is_shell_class("MSCTFIME UI"));
+        assert!(!is_shell_class("Chrome_WidgetWin_1"));
+        assert!(!is_shell_class("Notepad"));
     }
 
     #[cfg(not(windows))]

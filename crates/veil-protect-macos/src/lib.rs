@@ -9,6 +9,8 @@
 //! app points at `platform/macos/.build/release/libVeilMac.a`; the CLI links
 //! against it too when built on macOS.
 
+use std::collections::BTreeSet;
+
 use veil_core::ids::WindowId;
 use veil_core::state::ProtectionIntent;
 use veil_core::window::Platform;
@@ -29,6 +31,9 @@ pub enum MacError {
 pub struct MacBackend {
     #[cfg(target_os = "macos")]
     inner: ffi::Helper,
+    /// Windows this backend actually hid. Release must not touch anything
+    /// else (notably not Veil Surface windows, which are no-ops here).
+    hidden: BTreeSet<WindowId>,
 }
 
 impl MacBackend {
@@ -37,6 +42,7 @@ impl MacBackend {
         {
             Ok(Self {
                 inner: ffi::Helper::load().map_err(MacError::Helper)?,
+                hidden: BTreeSet::new(),
             })
         }
         #[cfg(not(target_os = "macos"))]
@@ -101,6 +107,7 @@ impl ProtectionBackend for MacBackend {
                     self.inner
                         .hide(intent.window)
                         .map_err(BackendError::failed)?;
+                    self.hidden.insert(intent.window);
                     Ok(())
                 }
                 #[cfg(not(target_os = "macos"))]
@@ -122,15 +129,21 @@ impl ProtectionBackend for MacBackend {
     }
 
     fn release(&mut self, window: WindowId) -> Result<(), BackendError> {
+        if !self.hidden.contains(&window) {
+            // Surface is a compositor effect, not an OS change, and a window we
+            // never hid must be left exactly as it is.
+            return Ok(());
+        }
         #[cfg(target_os = "macos")]
         {
-            self.inner.show(window).map_err(BackendError::failed)
+            self.inner.show(window).map_err(BackendError::failed)?;
         }
         #[cfg(not(target_os = "macos"))]
         {
             let _ = window;
-            Ok(())
         }
+        self.hidden.remove(&window);
+        Ok(())
     }
 
     fn describe(&self) -> String {
@@ -247,7 +260,7 @@ mod ffi {
                     bounds: Rect::new(window.x, window.y, window.width, window.height),
                     monitor: None,
                     visible: window.on_screen,
-                    minimized: false,
+                    minimized: !window.on_screen,
                     top_level: true,
                     platform: Platform::MacOs,
                     icon: String::new(),

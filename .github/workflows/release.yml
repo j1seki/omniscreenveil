@@ -80,6 +80,11 @@ jobs:
         env:
           VEIL_MACOS_STATIC_LIB: ${{ github.workspace }}/platform/macos/.build/release/libVeilMac.a
 
+      - name: Portable Windows build (portable config, no installer)
+        if: runner.os == 'Windows'
+        working-directory: apps/desktop
+        run: pnpm tauri build --target ${{ matrix.target }} --no-bundle --config src-tauri/tauri.portable.conf.json
+
       - name: Zip portable Windows build
         if: runner.os == 'Windows'
         shell: pwsh
@@ -90,6 +95,9 @@ jobs:
           $stage = "target/${{ matrix.target }}/release/portable"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item $exe $stage
+          $hook = "resources/veil_hook_win.dll"
+          if (-not (Test-Path $hook)) { throw "hook helper not found at $hook" }
+          Copy-Item $hook $stage
           Compress-Archive -Path "$stage/*" -DestinationPath "target/${{ matrix.target }}/release/OmniScreenVeil-portable-windows-x64.zip" -Force
           Write-Host "portable zip created"
 

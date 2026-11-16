@@ -49,6 +49,24 @@ impl ReconcilePlan {
 ///
 /// Returns one intent per window, using the highest-precedence mode requested
 /// by any matching rule, plus a record for every window with competing modes.
+///
+/// Unsupported modes are downgraded *before* the diff, so a backend that
+/// cannot honour a request is asked for the fallback once instead of being
+/// re-applied on every tick.
+pub fn plan_with_caps(
+    profile: &Profile,
+    windows: &[WindowInfo],
+    applied: &[AppliedProtection],
+    caps: &PlatformCapabilities,
+) -> ReconcilePlan {
+    let (mut desired, conflicts) = intents(profile, windows);
+    for intent in &mut desired {
+        intent.mode = caps.effective_mode(intent.mode);
+    }
+    diff(desired, conflicts, applied)
+}
+
+/// Resolve every enabled rule against the live window list.
 pub fn intents(
     profile: &Profile,
     windows: &[WindowInfo],
@@ -103,7 +121,15 @@ pub fn plan(
     windows: &[WindowInfo],
     applied: &[AppliedProtection],
 ) -> ReconcilePlan {
-    let (mut desired, conflicts) = intents(profile, windows);
+    let (desired, conflicts) = intents(profile, windows);
+    diff(desired, conflicts, applied)
+}
+
+fn diff(
+    mut desired: Vec<ProtectionIntent>,
+    conflicts: Vec<Conflict>,
+    applied: &[AppliedProtection],
+) -> ReconcilePlan {
     desired.sort_by_key(|i| i.window);
 
     let applied_map: BTreeMap<WindowId, &AppliedProtection> =
@@ -149,6 +175,7 @@ mod tests {
     use super::*;
     use crate::geometry::Rect;
     use crate::ids::{AppKey, RuleId};
+    use crate::rules::TargetRef;
     use crate::testutil::{app, window, windows};
     use crate::window::Platform;
 
@@ -255,8 +282,8 @@ mod tests {
     fn mode_precedence_wins_and_is_reported() {
         let mut profile = Profile::new();
         let app = AppKey::LinuxAppId("chrome".into());
-        profile.add_app_rule(app.clone(), ProtectionMode::StrictHide);
-        profile.add_app_rule(app, ProtectionMode::Exclusion);
+        profile.add_rule(TargetRef::App(app.clone()), ProtectionMode::StrictHide);
+        profile.add_rule(TargetRef::App(app), ProtectionMode::Exclusion);
         let live = windows(vec![window(1, "chrome", "A", Rect::new(0, 0, 10, 10))]);
         let (desired, conflicts) = intents(&profile, &live);
         assert_eq!(desired.len(), 1);

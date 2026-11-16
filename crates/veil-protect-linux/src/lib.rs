@@ -225,13 +225,18 @@ impl X11Platform {
             return Ok(None);
         }
 
-        let pid = self.cardinal(id, self.atoms.wm_pid).unwrap_or(0);
+        let pid = self.window_pid(id).unwrap_or(0);
         // Never list our own windows: the app window, the tray helper and the
         // portal dialogs would otherwise appear as protectable targets.
         if pid != 0 && pid == std::process::id() {
             return Ok(None);
         }
         let class = self.wm_class(id).unwrap_or_default();
+        if class.eq_ignore_ascii_case("omniscreenveil-desktop")
+            || class.eq_ignore_ascii_case("omniscreenveil")
+        {
+            return Ok(None);
+        }
         let exe = if pid != 0 {
             std::fs::read_link(format!("/proc/{pid}/exe"))
                 .ok()
@@ -301,6 +306,34 @@ impl X11Platform {
         value
     }
 
+    /// PID of the client behind a top-level window.
+    ///
+    /// Reparenting window managers put a frame between the root and the client,
+    /// and `_NET_WM_PID` lives on the client. Walk into the frame so own-window
+    /// masking keeps working under those WMs.
+    fn window_pid(&self, id: Window) -> Option<u32> {
+        if let Some(pid) = self.cardinal(id, self.atoms.wm_pid) {
+            return Some(pid);
+        }
+        self.descendant_pid(id, 3)
+    }
+
+    fn descendant_pid(&self, id: Window, depth: u32) -> Option<u32> {
+        if depth == 0 {
+            return None;
+        }
+        let tree = self.conn.query_tree(id).ok()?.reply().ok()?;
+        for child in tree.children {
+            if let Some(pid) = self.cardinal(child, self.atoms.wm_pid) {
+                return Some(pid);
+            }
+            if let Some(pid) = self.descendant_pid(child, depth - 1) {
+                return Some(pid);
+            }
+        }
+        None
+    }
+
     fn wm_class(&self, id: Window) -> Option<String> {
         let reply = self
             .conn
@@ -339,6 +372,23 @@ impl X11Platform {
         Ok(())
     }
 
+    fn is_own_window(&self, id: Window, own_pid: u32) -> bool {
+        if own_pid == 0 {
+            return false;
+        }
+        if self.window_pid(id) == Some(own_pid) {
+            return true;
+        }
+        if let Some(class) = self.wm_class(id) {
+            if class.eq_ignore_ascii_case("omniscreenveil-desktop")
+                || class.eq_ignore_ascii_case("omniscreenveil")
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Bounds of every mapped window owned by this process.
     ///
     /// The Veil Surface must never contain itself, otherwise the shared frame
@@ -368,7 +418,7 @@ impl X11Platform {
             if attrs.map_state != MapState::VIEWABLE {
                 continue;
             }
-            if self.cardinal(id, self.atoms.wm_pid) != Some(pid) {
+            if !self.is_own_window(id, pid) {
                 continue;
             }
             let Some(geom) = self
@@ -440,7 +490,7 @@ impl X11Platform {
             if attrs.map_state != MapState::VIEWABLE || attrs.override_redirect {
                 continue;
             }
-            if own_pid != 0 && self.cardinal(id, self.atoms.wm_pid) == Some(own_pid) {
+            if self.is_own_window(id, own_pid) {
                 continue;
             }
             let Some(geometry) = self
@@ -693,7 +743,20 @@ impl X11Backend {
     }
 
     pub fn list_windows(&self) -> Result<Vec<WindowInfo>, X11Error> {
-        self.platform.list_windows()
+        let mut windows = self.platform.list_windows()?;
+        // Keep strict-hidden windows in the inventory even if the window
+        // manager removed them from `_NET_CLIENT_LIST` after we unmapped them.
+        // Dropping them would make reconcile release and re-hide in a loop.
+        for id in &self.hidden {
+            if windows.iter().any(|window| window.id == *id) {
+                continue;
+            }
+            if let Some(info) = self.platform.describe_window(id.0 as u32)? {
+                windows.push(info);
+            }
+        }
+        windows.sort_by_key(|window| window.id);
+        Ok(windows)
     }
 
     pub fn hidden(&self) -> &BTreeSet<WindowId> {

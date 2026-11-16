@@ -118,7 +118,10 @@ public func veilMacosFreeBuffer(_ pointer: UnsafeMutablePointer<UInt8>?) {
 /// UTF-8 string owned by the caller (`veil_macos_free_string`).
 @_cdecl("veil_macos_list_windows_json")
 public func veilMacosListWindowsJson() -> UnsafeMutablePointer<CChar>? {
-    let windows = VeilMac.listWindows(includeOffscreen: false)
+    // Include off-screen windows: strict hide minimizes windows, and dropping
+    // them from the inventory would make the engine think they vanished and
+    // immediately re-plan them (flicker).
+    let windows = VeilMac.listWindows(includeOffscreen: true)
     let encoder = JSONEncoder()
     guard let data = try? encoder.encode(windows),
         let text = String(data: data, encoding: .utf8)
