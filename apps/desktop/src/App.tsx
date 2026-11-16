@@ -1,15 +1,23 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Activity,
-  Keyboard,
+  CircleHelp,
+  LayoutDashboard,
+  ListFilter,
+  Moon,
+  PanelsTopLeft,
+  RefreshCw,
+  ScanSearch,
+  Settings2,
   Shield,
   ShieldCheck,
   ShieldOff,
   Sparkles,
-  Terminal,
+  Sun,
   Trash2,
+  Waypoints,
 } from "lucide-react";
 import * as api from "./api";
+import { useTheme } from "./lib/theme";
 import type {
   AutoArm,
   Capabilities,
@@ -20,21 +28,21 @@ import type {
   VerificationRun,
   WindowInfo,
 } from "./types";
-import { findRuleForWindow, isCaptureWindow, modeLabel } from "./types";
-import { cn } from "./lib/utils";
+import { findRuleForWindow } from "./types";
 import { BackendBanner } from "./components/BackendBanner";
-import { CapabilitiesCard } from "./components/CapabilitiesCard";
-import { RulesCard } from "./components/RulesCard";
-import { SurfaceCard } from "./components/SurfaceCard";
-import { TopBar } from "./components/TopBar";
-import { VerificationCard } from "./components/VerificationCard";
-import { WindowList } from "./components/WindowList";
-import { Button } from "./components/ui/button";
+import { CommandPalette, type Command as CommandType } from "./components/CommandPalette";
+import { ConfirmDialog } from "./components/ConfirmDialog";
+import { Sidebar, type Page } from "./components/Sidebar";
+import { MOD, TitleBar } from "./components/TitleBar";
+import { Toaster, type Toast } from "./components/Toaster";
 import { TooltipProvider } from "./components/ui/tooltip";
-
-type RightTab = "all" | "surface" | "verify" | "policy";
+import { AuditPage, CapabilitiesPage, RulesPage, SurfacePage } from "./pages/InspectorPages";
+import { OverviewPage } from "./pages/OverviewPage";
+import { WindowsPage } from "./pages/WindowsPage";
 
 export default function App() {
+  const { theme, toggle: toggleTheme } = useTheme();
+  const [page, setPage] = useState<Page>("overview");
   const [caps, setCaps] = useState<Capabilities | null>(null);
   const [matrix, setMatrix] = useState<Capabilities[]>([]);
   const [inv, setInv] = useState<Inventory | null>(null);
@@ -43,12 +51,24 @@ export default function App() {
   const [verification, setVerification] = useState<VerificationRun | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [rightTab, setRightTab] = useState<RightTab>("all");
-  const [telemetryLog, setTelemetryLog] = useState<string>(
-    "ENGINE_READY // ZERO_TELEMETRY · LOCAL_EXECUTION_ONLY",
-  );
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [confirm, setConfirm] = useState<{
+    title: string;
+    description: string;
+    label: string;
+    danger?: boolean;
+    action: () => void;
+  } | null>(null);
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const toastId = useState(() => ({ n: 0 }))[0];
 
-  const refresh = useCallback(async (label = "refresh") => {
+  const notify = useCallback((message: string, kind: Toast["kind"] = "success") => {
+    const id = ++toastId.n;
+    setToasts((t) => [...t, { id, message, kind }]);
+    window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3600);
+  }, [toastId]);
+
+  const refresh = useCallback(async (label = "refresh", quiet = false) => {
     setBusy(label);
     try {
       const [nextInventory, nextProfile, nextPreview] = await Promise.all([
@@ -60,12 +80,14 @@ export default function App() {
       setProfile(nextProfile);
       setPreview(nextPreview.value);
       setError(nextPreview.error);
+      if (!quiet && nextPreview.error) notify(nextPreview.error, "error");
     } catch (err) {
       setError(String(err));
+      if (!quiet) notify(String(err), "error");
     } finally {
       setBusy(null);
     }
-  }, []);
+  }, [notify]);
 
   useEffect(() => {
     let cancelled = false;
@@ -82,10 +104,8 @@ export default function App() {
         if (!cancelled) setError(String(err));
       }
     })();
-    void refresh();
-    return () => {
-      cancelled = true;
-    };
+    void refresh("initial", true);
+    return () => { cancelled = true; };
   }, [refresh]);
 
   useEffect(() => {
@@ -93,35 +113,28 @@ export default function App() {
     let unlisten: (() => void) | undefined;
     void (async () => {
       const { listen } = await import("@tauri-apps/api/event");
-      unlisten = await listen("veil://changed", () => {
-        void refresh();
-      });
+      unlisten = await listen("veil://changed", () => { void refresh("event", true); });
     })();
     return () => unlisten?.();
   }, [refresh]);
 
-  async function setProtection(
-    window: WindowInfo,
-    enabled: boolean,
-    mode: ProtectionMode,
-  ) {
+  async function setProtection(window: WindowInfo, enabled: boolean, mode: ProtectionMode) {
     setBusy(`window-${window.id}`);
     try {
       if (enabled) {
         await api.addAppRule(window.app, mode);
-        setTelemetryLog(
-          `RULE_APPLIED // ${window.app_name} -> ${modeLabel(mode).toUpperCase()}`,
-        );
+        notify(`${window.app_name} protected with ${mode.replace("_", " ")}`);
       } else {
         await api.removeAppRules(window.app);
         await api.removeWindowRules(window.id);
-        setTelemetryLog(`RULE_REMOVED // ${window.app_name}`);
+        notify(`${window.app_name} rule removed`, "info");
       }
       await api.tick();
-      await refresh("tick");
+      await refresh("tick", true);
       setError(null);
     } catch (err) {
       setError(String(err));
+      notify(String(err), "error");
     } finally {
       setBusy(null);
     }
@@ -131,13 +144,12 @@ export default function App() {
     setBusy("arm");
     try {
       const report = await api.tick();
-      await refresh("tick");
-      setTelemetryLog(
-        `SHIELD_ARMED // APPLIED:${report.applied.length} UNCHANGED:${report.unchanged} FAILED:${report.failed.length}`,
-      );
+      await refresh("tick", true);
       setError(null);
+      notify(`Protection armed · ${report.applied.length} applied`);
     } catch (err) {
       setError(String(err));
+      notify(String(err), "error");
     } finally {
       setBusy(null);
     }
@@ -146,16 +158,14 @@ export default function App() {
   async function protectAllWindows() {
     setBusy("protect-all");
     try {
-      const mode: ProtectionMode =
-        caps?.modes.exclusion.level !== "unsupported" ? "exclusion" : "surface";
+      const mode: ProtectionMode = caps?.modes.exclusion.level !== "unsupported" ? "exclusion" : "surface";
       await api.protectAll(mode);
-      await refresh("protect-all");
-      setTelemetryLog(
-        `BULK_SHIELD_ENGAGED // ALL PROTECTABLE APPS -> ${modeLabel(mode).toUpperCase()}`,
-      );
+      await refresh("protect-all", true);
       setError(null);
+      notify("All protectable windows covered");
     } catch (err) {
       setError(String(err));
+      notify(String(err), "error");
     } finally {
       setBusy(null);
     }
@@ -165,14 +175,13 @@ export default function App() {
     setBusy("release");
     try {
       const report = await api.releaseAll();
-      await refresh("release");
-      if (report.failed.length) throw new Error(`Release failed: ${report.failed.join("; ")}`);
-      setTelemetryLog(
-        `SHIELD_DISARMED // RELEASED ${report.released} WINDOWS (RULES PRESERVED)`,
-      );
+      await refresh("release", true);
       setError(null);
+      notify(report.failed.length ? `Release failed: ${report.failed.join("; ")}` : `Released ${report.released} windows · rules preserved`,
+        report.failed.length ? "error" : "info");
     } catch (err) {
       setError(String(err));
+      notify(String(err), "error");
     } finally {
       setBusy(null);
     }
@@ -183,12 +192,11 @@ export default function App() {
     try {
       const res = await api.verify();
       setVerification(res);
-      setTelemetryLog(
-        `CANARY_AUDIT // OUTCOME:${res.outcome.toUpperCase()} PATH:${res.record.path.toUpperCase()}`,
-      );
       setError(null);
+      notify(`Synthetic audit: ${res.outcome}`, res.outcome === "protected" ? "success" : "info");
     } catch (err) {
       setError(String(err));
+      notify(String(err), "error");
     } finally {
       setBusy(null);
     }
@@ -199,295 +207,227 @@ export default function App() {
     try {
       await api.resetProfile();
       await api.releaseAll();
-      await refresh("reset");
-      setTelemetryLog("PROFILE_RESET // ALL RULES PURGED & WINDOWS RESTORED");
+      await refresh("reset", true);
       setError(null);
+      notify("All rules purged and windows restored", "info");
     } catch (err) {
       setError(String(err));
+      notify(String(err), "error");
     } finally {
       setBusy(null);
     }
   }
 
-  async function setAutoArm(autoArm: AutoArm) {
+  async function setAutoArm(v: AutoArm) {
     setBusy("auto-arm");
     try {
-      await api.setAutoArm(autoArm);
-      await refresh("auto-arm");
-      setTelemetryLog(`AUTO_ARM_POLICY // SET TO ${autoArm.toUpperCase()}`);
+      await api.setAutoArm(v);
+      await refresh("auto-arm", true);
       setError(null);
+      notify(`Auto-arm policy: ${v.replaceAll("_", " ")}`, "info");
     } catch (err) {
       setError(String(err));
+      notify(String(err), "error");
     } finally {
       setBusy(null);
     }
   }
 
-  const busyMode = busy !== null;
-  const backend = inv?.backend ?? null;
   const windows = inv?.windows ?? [];
-  const applied = inv?.applied ?? [];
-  const protectedCount = windows.filter((w) =>
-    Boolean(findRuleForWindow(profile, w)),
-  ).length;
-  const isArmed = Boolean(inv?.armed) || applied.length > 0;
-  const captureActive =
-    Boolean(inv?.capture_active) || windows.some(isCaptureWindow);
+  const protectedCount = windows.filter((w) => Boolean(findRuleForWindow(profile, w))).length;
+  const isArmed = Boolean(inv?.armed) || (inv?.applied.length ?? 0) > 0;
+  const emptyInventory: Inventory = {
+    windows: [],
+    backend: { platform: caps?.platform ?? "linux_x11", name: "", live: false, note: "" },
+    applied: [],
+  };
+
+  const commands = useMemo<CommandType[]>(() => [
+    { id: "nav-overview", label: "Go to Overview", group: "Navigation", icon: LayoutDashboard, shortcut: `${MOD}1`, run: () => setPage("overview") },
+    { id: "nav-windows", label: "Go to Windows", group: "Navigation", icon: ListFilter, shortcut: `${MOD}2`, run: () => setPage("windows") },
+    { id: "nav-surface", label: "Go to Veil Surface", group: "Navigation", icon: PanelsTopLeft, shortcut: `${MOD}3`, run: () => setPage("surface") },
+    { id: "nav-audit", label: "Go to Canary audit", group: "Navigation", icon: ScanSearch, shortcut: `${MOD}4`, run: () => setPage("audit") },
+    { id: "nav-rules", label: "Go to Rules & automation", group: "Navigation", icon: Waypoints, shortcut: `${MOD}5`, run: () => setPage("rules") },
+    { id: "nav-capabilities", label: "Go to Capabilities", group: "Navigation", icon: Settings2, shortcut: `${MOD}6`, run: () => setPage("capabilities") },
+    { id: "arm", label: isArmed ? "Disarm protection" : "Arm protection", group: "Protection", icon: isArmed ? ShieldOff : Shield, keywords: "toggle veil shield", run: () => { void (isArmed ? releaseEverything() : protectedCount ? armNow() : protectAllWindows()); } },
+    { id: "protect-all", label: "Protect all windows", group: "Protection", icon: Sparkles, keywords: "bulk select everything", run: () => { void protectAllWindows(); } },
+    { id: "open-surface", label: "Open Surface window", group: "Protection", icon: PanelsTopLeft, keywords: "share screen", run: () => { void api.openSurface().catch((e) => notify(String(e), "error")); } },
+    { id: "audit", label: "Run canary audit", group: "Verification", icon: ScanSearch, keywords: "synthetic test pixel", run: () => { setPage("audit"); void runVerification(); } },
+    { id: "refresh", label: "Refresh inventory", group: "Verification", icon: RefreshCw, shortcut: `${MOD}R`, run: () => { void refresh(); } },
+    { id: "theme", label: `Switch to ${theme === "dark" ? "light" : "dark"} theme`, group: "Preferences", icon: theme === "dark" ? Sun : Moon, shortcut: `${MOD}D`, run: toggleTheme },
+    { id: "shortcuts", label: "Show keyboard shortcuts", group: "Preferences", icon: CircleHelp, keywords: "help keys", run: () => setPaletteOpen(true) },
+    { id: "clear", label: "Purge all rules", group: "Danger zone", icon: Trash2, danger: true, keywords: "reset clear delete", run: () => setConfirm({ title: "Purge all rules?", description: "This removes every persistent rule and releases all protection. This cannot be undone.", label: "Purge rules", danger: true, action: () => { void clearRules(); } }) },
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  ], [isArmed, protectedCount, theme, refresh, toggleTheme, notify]);
+
+  const openPalette = useCallback(() => setPaletteOpen(true), []);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && e.key.toLowerCase() === "k") { e.preventDefault(); setPaletteOpen((o) => !o); return; }
+      if (mod && e.key.toLowerCase() === "d") { e.preventDefault(); toggleTheme(); return; }
+      if (mod && e.key.toLowerCase() === "r") { e.preventDefault(); void refresh(); return; }
+      if (mod && /^[1-6]$/.test(e.key)) {
+        e.preventDefault();
+        setPage((["overview", "windows", "surface", "audit", "rules", "capabilities"] as Page[])[Number(e.key) - 1]);
+        return;
+      }
+      if (e.key === "Escape") { setPaletteOpen(false); setConfirm(null); }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [refresh, toggleTheme]);
+
+  function toggleArm() {
+    if (isArmed) void releaseEverything();
+    else if (protectedCount) void armNow();
+    else void protectAllWindows();
+  }
 
   return (
     <TooltipProvider>
-      <div className="flex h-full flex-col bg-cyber-grid text-ink">
-        <TopBar
-          backend={backend}
-          platform={caps?.platform ?? null}
+      <div className="flex h-full w-full overflow-hidden bg-app text-text">
+        <Sidebar
+          page={page}
+          onNavigate={setPage}
+          theme={theme}
+          onToggleTheme={toggleTheme}
+          onOpenPalette={openPalette}
+          backend={inv?.backend ?? null}
           armed={isArmed}
           protectedCount={protectedCount}
-          totalWindows={windows.length}
-          captureActive={captureActive}
-          busy={busyMode}
-          onToggleArm={() => {
-            if (isArmed) {
-              void releaseEverything();
-            } else if (protectedCount === 0 && windows.length > 0) {
-              void protectAllWindows();
-            } else {
-              void armNow();
-            }
-          }}
-          onOpenSurface={() =>
-            void api.openSurface().catch((err) => setError(String(err)))
-          }
+          onToggleArm={toggleArm}
+          onOpenSurface={() => { void api.openSurface().catch((e) => notify(String(e), "error")); }}
         />
 
-        {/* Status / Alert Strip */}
-        <div className="space-y-1.5 px-4 pt-2 pb-1.5">
-          {backend && (
-            <BackendBanner
-              tone={backend.live ? "info" : "warning"}
-              title={backend.live ? `[${backend.name.toUpperCase()}]` : "[SIMULATION_MODE]"}
-            >
-              {backend.note}
-            </BackendBanner>
-          )}
-          {error && (
-            <BackendBanner tone="error" title="[BACKEND_ERROR]">
-              {error}
-            </BackendBanner>
-          )}
+        <div className="flex min-w-0 flex-1 flex-col">
+          <TitleBar
+            page={page}
+            backend={inv?.backend ?? null}
+            platform={caps?.platform ?? null}
+            armed={isArmed}
+            busy={busy !== null}
+            onOpenPalette={openPalette}
+            onRefresh={() => void refresh()}
+            onToggleArm={toggleArm}
+            onOpenSurface={() => { void api.openSurface().catch((e) => notify(String(e), "error")); }}
+          />
+
+          <div className="px-6 pt-3">
+            {inv?.backend && (
+              <BackendBanner
+                tone={inv.backend.live ? "info" : "warning"}
+                title={inv.backend.live ? `${inv.backend.name} backend` : "Preview mode"}
+              >
+                {inv.backend.note}
+              </BackendBanner>
+            )}
+            {error && <div className="mt-2"><BackendBanner tone="error" title="Command failed">{error}</BackendBanner></div>}
+          </div>
+
+          <main className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+            {page === "overview" && (
+              <OverviewPage
+                inventory={inv ?? emptyInventory}
+                profile={profile}
+                caps={caps}
+                preview={preview}
+                backend={inv?.backend ?? null}
+                onNavigate={(p) => setPage(p)}
+                onToggleWindow={(w) => {
+                  const rule = findRuleForWindow(profile, w);
+                  const mode = rule?.mode ?? (caps?.modes.exclusion.level !== "unsupported" ? "exclusion" : "surface");
+                  void setProtection(w, !rule, mode);
+                }}
+              />
+            )}
+            {page === "windows" && (
+              <WindowsPage
+                inventory={inv ?? emptyInventory}
+                profile={profile}
+                caps={caps}
+                busy={busy !== null}
+                onRefresh={() => void refresh()}
+                onToggle={(w) => {
+                  const rule = findRuleForWindow(profile, w);
+                  const mode = rule?.mode ?? (caps?.modes.exclusion.level !== "unsupported" ? "exclusion" : "surface");
+                  void setProtection(w, !rule, mode);
+                }}
+                onMode={(w, mode) => void setProtection(w, true, mode)}
+              />
+            )}
+            {page === "surface" && (
+              <SurfacePage
+                preview={preview}
+                busy={busy !== null}
+                onRender={() => void refresh("preview")}
+                onOpen={() => { void api.openSurface().catch((e) => notify(String(e), "error")); }}
+              />
+            )}
+            {page === "audit" && (
+              <AuditPage verification={verification} busy={busy !== null} onRun={() => void runVerification()} />
+            )}
+            {page === "rules" && (
+              <RulesPage
+                profile={profile}
+                busy={busy !== null}
+                onAutoArm={(v) => void setAutoArm(v)}
+                onToggleRule={async (id, enabled) => {
+                  setBusy("rules");
+                  try {
+                    await api.setRuleEnabled(id, enabled);
+                    await api.tick();
+                    await refresh("rules", true);
+                    setError(null);
+                  } catch (err) { setError(String(err)); notify(String(err), "error"); }
+                  finally { setBusy(null); }
+                }}
+                onRemoveRule={async (id) => {
+                  setBusy("rules");
+                  try {
+                    await api.removeRule(id);
+                    await api.tick();
+                    await refresh("rules", true);
+                    setError(null);
+                  } catch (err) { setError(String(err)); notify(String(err), "error"); }
+                  finally { setBusy(null); }
+                }}
+                onClear={() => setConfirm({ title: "Purge all rules?", description: "Every persistent rule will be removed and all protection released.", label: "Purge rules", danger: true, action: () => { void clearRules(); } })}
+              />
+            )}
+            {page === "capabilities" && <CapabilitiesPage caps={caps} matrix={matrix} />}
+          </main>
+
+          <footer className="flex h-8 shrink-0 items-center justify-between border-t border-border bg-app px-6 text-[10px] text-faint">
+            <span className="flex items-center gap-2">
+              <kbd className="rounded border border-border bg-panel px-1.5 py-0.5 font-mono">{MOD}K</kbd>
+              commands
+              <span className="text-border-strong">·</span>
+              <kbd className="rounded border border-border bg-panel px-1.5 py-0.5 font-mono">{MOD}D</kbd>
+              theme
+              <span className="text-border-strong">·</span>
+              <kbd className="rounded border border-border bg-panel px-1.5 py-0.5 font-mono">{MOD}1–6</kbd>
+              navigate
+            </span>
+            <span className="flex items-center gap-1.5">
+              <ShieldCheck className="size-3 text-success" />
+              100% local · no telemetry
+            </span>
+          </footer>
         </div>
 
-        {/* Main Two-Column Systems Deck */}
-        <main className="flex min-h-0 flex-1 gap-3 px-4 pb-2">
-          {/* Left Column: Window Matrix + Bulk Command Bar */}
-          <div className="flex min-w-0 flex-[1.55] flex-col gap-2">
-            <WindowList
-              inventory={
-                inv ?? {
-                  windows: [],
-                  backend: backend ?? {
-                    platform: "linux_x11",
-                    name: "",
-                    live: false,
-                    note: "",
-                  },
-                  applied: [],
-                }
-              }
-              profile={profile}
-              caps={caps}
-              busy={busyMode}
-              onRefresh={() => void refresh()}
-              onToggle={(window) => {
-                const rule = findRuleForWindow(profile, window);
-                const mode =
-                  rule?.mode ??
-                  (caps?.modes.exclusion.level !== "unsupported"
-                    ? "exclusion"
-                    : "surface");
-                void setProtection(window, !rule, mode);
-              }}
-              onMode={(window, mode) => void setProtection(window, true, mode)}
-            />
-
-            {/* Bottom Bulk Command Deck */}
-            <div className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-panel/95 px-3 py-2 font-mono shadow-md">
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => void protectAllWindows()}
-                disabled={busyMode}
-                className="h-8 gap-1.5 font-mono text-xs"
-              >
-                <Sparkles className="size-3.5 text-accent" />
-                Protect all
-              </Button>
-              <Button
-                size="sm"
-                onClick={() => void armNow()}
-                disabled={busyMode}
-                className="h-8 gap-1.5 font-mono text-xs"
-              >
-                <ShieldCheck className="size-3.5" />
-                Arm now
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => void releaseEverything()}
-                disabled={busyMode}
-                className="h-8 gap-1.5 font-mono text-xs"
-              >
-                <ShieldOff className="size-3.5 text-warn" />
-                Release all
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => void clearRules()}
-                disabled={busyMode}
-                className="h-8 gap-1.5 font-mono text-xs text-ink-dim hover:text-bad"
-              >
-                <Trash2 className="size-3.5" />
-                Clear rules
-              </Button>
-
-              <div className="ml-auto flex items-center gap-2 text-[11px]">
-                <span
-                  className={cn(
-                    "inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 font-bold",
-                    isArmed
-                      ? "border-accent/40 bg-accent/15 text-accent"
-                      : "border-line bg-void text-ink-dim",
-                  )}
-                >
-                  <Shield className="size-3" />
-                  {applied.length} ACTIVE · {protectedCount} RULED
-                </span>
-              </div>
-            </div>
-          </div>
-
-          {/* Right Column: Multi-Module Inspector Deck */}
-          <aside className="flex min-w-0 flex-1 flex-col gap-2">
-            {/* Module Filter Bar */}
-            <div className="flex items-center justify-between gap-1 rounded-xl border border-line bg-panel/95 p-1 font-mono text-[10px]">
-              {(
-                [
-                  { id: "all", label: "ALL_DECK" },
-                  { id: "surface", label: "02 // SURFACE" },
-                  { id: "verify", label: "03 // CANARY" },
-                  { id: "policy", label: "04 // POLICY" },
-                ] as { id: RightTab; label: string }[]
-              ).map((tab) => (
-                <button
-                  key={tab.id}
-                  type="button"
-                  onClick={() => setRightTab(tab.id)}
-                  className={cn(
-                    "flex-1 whitespace-nowrap rounded-lg px-2 py-1.5 text-center font-bold transition-all cursor-pointer",
-                    rightTab === tab.id
-                      ? "bg-row text-accent border border-accent/35 shadow-sm"
-                      : "text-ink-faint hover:text-ink",
-                  )}
-                >
-                  {tab.label}
-                </button>
-              ))}
-            </div>
-
-            <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto pr-0.5">
-              {(rightTab === "all" || rightTab === "surface") && (
-                <SurfaceCard
-                  preview={preview}
-                  busy={busyMode}
-                  onRender={() => void refresh("preview")}
-                  onOpen={() =>
-                    void api.openSurface().catch((err) => setError(String(err)))
-                  }
-                />
-              )}
-
-              {(rightTab === "all" || rightTab === "verify") && (
-                <VerificationCard
-                  verification={verification}
-                  busy={busyMode}
-                  onRun={() => void runVerification()}
-                />
-              )}
-
-              {(rightTab === "all" || rightTab === "policy") && (
-                <>
-                  <RulesCard
-                    profile={profile}
-                    busy={busyMode}
-                    onToggleRule={async (id, enabled) => {
-                      setBusy("rules");
-                      try {
-                        await api.setRuleEnabled(id, enabled);
-                        await api.tick();
-                        await refresh("rules");
-                        setError(null);
-                      } catch (err) {
-                        setError(String(err));
-                      } finally {
-                        setBusy(null);
-                      }
-                    }}
-                    onRemoveRule={async (id) => {
-                      setBusy("rules");
-                      try {
-                        await api.removeRule(id);
-                        await api.tick();
-                        await refresh("rules");
-                        setError(null);
-                      } catch (err) {
-                        setError(String(err));
-                      } finally {
-                        setBusy(null);
-                      }
-                    }}
-                    onClear={() => void clearRules()}
-                    onAutoArm={(autoArm) => void setAutoArm(autoArm)}
-                  />
-                  <CapabilitiesCard caps={caps} matrix={matrix} />
-                </>
-              )}
-            </div>
-          </aside>
-        </main>
-
-        {/* OpenCode-Style Telemetry Footer */}
-        <footer className="flex items-center justify-between gap-4 border-t border-line bg-panel/95 px-4 py-1.5 font-mono text-[10px] text-ink-faint">
-          <div className="flex items-center gap-3">
-            <span className="inline-flex items-center gap-1.5 text-ink-dim">
-              <Keyboard className="size-3.5 text-accent" />
-              <kbd className="rounded border border-line bg-void px-1.5 py-0.5 text-[9px] text-ink">
-                Ctrl
-              </kbd>
-              +
-              <kbd className="rounded border border-line bg-void px-1.5 py-0.5 text-[9px] text-ink">
-                Shift
-              </kbd>
-              +
-              <kbd className="rounded border border-line bg-void px-1.5 py-0.5 text-[9px] text-accent">
-                V
-              </kbd>
-              <span className="text-ink-faint">GLOBAL_ARM_TOGGLE</span>
-            </span>
-
-            <span className="hidden md:inline-flex items-center gap-1.5 text-cyan">
-              <Terminal className="size-3" />
-              {telemetryLog}
-            </span>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <span className="inline-flex items-center gap-1 text-good">
-              <Activity className="size-3" />
-              100% LOCAL · ZERO TELEMETRY
-            </span>
-          </div>
-        </footer>
+        <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />
+        <ConfirmDialog
+          open={confirm !== null}
+          title={confirm?.title ?? ""}
+          description={confirm?.description ?? ""}
+          confirmLabel={confirm?.label}
+          danger={confirm?.danger}
+          onCancel={() => setConfirm(null)}
+          onConfirm={() => { confirm?.action(); setConfirm(null); }}
+        />
+        <Toaster toasts={toasts} onDismiss={(id) => setToasts((t) => t.filter((x) => x.id !== id))} />
       </div>
     </TooltipProvider>
   );

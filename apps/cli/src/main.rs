@@ -17,7 +17,9 @@ use veil_core::capability::ProtectionMode;
 use veil_core::ids::{AppKey, WindowId};
 use veil_core::testutil::demo_windows;
 use veil_core::{Platform, PlatformCapabilities, Profile, Size, VerifyOutcome};
-use veil_protect::{Engine, MemoryBackend, TickReport};
+#[cfg(target_os = "linux")]
+use veil_protect::TickReport;
+use veil_protect::{Engine, MemoryBackend};
 use veil_verify::{SyntheticCapture, SyntheticDesktop, VerificationHarness};
 
 #[derive(Parser)]
@@ -839,6 +841,7 @@ fn wayland_release(_json: bool, _id: WindowId) -> Result<i32> {
     bail!("Wayland backend is not available on this host")
 }
 
+#[cfg(target_os = "linux")]
 fn print_report(json: bool, report: &TickReport) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(report)?);

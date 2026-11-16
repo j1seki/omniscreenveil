@@ -19,7 +19,6 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
 license = "GPL-3.0-or-later"
-authors = ["OmniScreenVeil contributors"]
 
 [workspace.dependencies]
 veil-core = { path = "crates/veil-core" }
@@ -31,7 +30,6 @@ veil-protect-linux = { path = "crates/veil-protect-linux" }
 veil-protect-wayland = { path = "crates/veil-protect-wayland" }
 veil-protect-win = { path = "crates/veil-protect-win" }
 veil-protect-macos = { path = "crates/veil-protect-macos" }
-veil-hook-win = { path = "crates/veil-hook-win" }
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

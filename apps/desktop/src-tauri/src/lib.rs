@@ -97,7 +97,8 @@ fn inventory(state: State<'_, Mutex<AppState>>) -> Result<Inventory, String> {
     let state = lock(&state)?;
     let windows = state.engine.backend.list_windows()?;
     let capture_active = veil_core::capture_app_running(&windows);
-    let armed = state.engine.should_arm(&windows, state.armed) || !state.engine.applied().is_empty();
+    let armed =
+        state.engine.should_arm(&windows, state.armed) || !state.engine.applied().is_empty();
     Ok(Inventory {
         windows,
         backend: state.info.clone(),
@@ -138,10 +139,7 @@ fn add_window_rule(
 
 /// Protect every app that currently owns a protectable window.
 #[tauri::command]
-fn protect_all(
-    state: State<'_, Mutex<AppState>>,
-    mode: ProtectionMode,
-) -> Result<Profile, String> {
+fn protect_all(state: State<'_, Mutex<AppState>>, mode: ProtectionMode) -> Result<Profile, String> {
     let mut state = lock(&state)?;
     let own_pid = std::process::id();
     let windows: Vec<_> = state
@@ -160,10 +158,7 @@ fn protect_all(
 }
 
 #[tauri::command]
-fn remove_app_rules(
-    state: State<'_, Mutex<AppState>>,
-    app: AppKey,
-) -> Result<Profile, String> {
+fn remove_app_rules(state: State<'_, Mutex<AppState>>, app: AppKey) -> Result<Profile, String> {
     let mut state = lock(&state)?;
     let target = app.normalized();
     state.engine.profile.rules.retain(|rule| {
@@ -179,9 +174,11 @@ fn remove_window_rules(
     window: WindowId,
 ) -> Result<Profile, String> {
     let mut state = lock(&state)?;
-    state.engine.profile.rules.retain(|rule| {
-        !matches!(&rule.target, veil_core::TargetRef::Window(id) if *id == window)
-    });
+    state
+        .engine
+        .profile
+        .rules
+        .retain(|rule| !matches!(&rule.target, veil_core::TargetRef::Window(id) if *id == window));
     state.save()?;
     Ok(state.engine.profile.clone())
 }
@@ -307,8 +304,7 @@ fn preview(state: State<'_, Mutex<AppState>>) -> Result<SurfacePreview, String> 
         None => return Err("Live desktop capture failed. The Surface is unavailable; check capture permissions and platform support.".into()),
     };
 
-    let mut plan =
-        veil_surface::SurfacePlan::new(source_frame.size(), FillStyle::veiled());
+    let mut plan = veil_surface::SurfacePlan::new(source_frame.size(), FillStyle::veiled());
     let mut masked = 0usize;
     for window in &windows {
         if surface.contains(&window.id) {
@@ -504,7 +500,11 @@ fn start_auto_monitor(app: tauri::AppHandle) {
             guard.engine.auto_tick(&windows, explicit)
         };
         let events = guard.engine.drain_events();
-        if report.tick.as_ref().is_some_and(|tick| tick.pruned_rules > 0) {
+        if report
+            .tick
+            .as_ref()
+            .is_some_and(|tick| tick.pruned_rules > 0)
+        {
             let _ = guard.save();
         }
         drop(guard);
@@ -546,7 +546,9 @@ fn open_surface(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 pub fn run() {
-    use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+    use tauri_plugin_global_shortcut::{
+        Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
+    };
     let toggle_shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyV);
 
     let app = tauri::Builder::default()
@@ -618,7 +620,13 @@ pub fn run() {
             let open = MenuItem::with_id(app, "open", "Open OmniScreenVeil", true, None::<&str>)?;
             let surface =
                 MenuItem::with_id(app, "surface", "Open Surface window", true, None::<&str>)?;
-            let arm = MenuItem::with_id(app, "arm", "Arm / disarm (Ctrl+Shift+V)", true, None::<&str>)?;
+            let arm = MenuItem::with_id(
+                app,
+                "arm",
+                "Arm / disarm (Ctrl+Shift+V)",
+                true,
+                None::<&str>,
+            )?;
             let release =
                 MenuItem::with_id(app, "release", "Release all protection", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;

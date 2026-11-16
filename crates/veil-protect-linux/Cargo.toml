@@ -8,13 +8,13 @@ license.workspace = true
 
 [dependencies]
 veil-core.workspace = true
-veil-protect.workspace = true
 veil-surface.workspace = true
 veil-verify.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+veil-protect.workspace = true
 x11rb.workspace = true
 
 [dev-dependencies]

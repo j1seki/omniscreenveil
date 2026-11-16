@@ -6,7 +6,7 @@
 //! say so in the UI instead of pretending protection is live.
 
 use veil_core::window::Platform;
-use veil_core::{WindowInfo, WindowId};
+use veil_core::{WindowId, WindowInfo};
 use veil_protect::{BackendError, MemoryBackend, ProtectionBackend};
 use veil_surface::Frame;
 

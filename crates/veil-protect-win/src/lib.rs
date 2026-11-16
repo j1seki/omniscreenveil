@@ -239,7 +239,7 @@ mod win {
             };
             let priv_name = wide("SeDebugPrivilege");
             if LookupPrivilegeValueW(std::ptr::null(), priv_name.as_ptr(), &mut luid) != 0 {
-                let mut tp = TOKEN_PRIVILEGES {
+                let tp = TOKEN_PRIVILEGES {
                     PrivilegeCount: 1,
                     Privileges: [windows_sys::Win32::Security::LUID_AND_ATTRIBUTES {
                         Luid: luid,
@@ -249,7 +249,7 @@ mod win {
                 let _ = AdjustTokenPrivileges(
                     token,
                     0,
-                    &mut tp,
+                    &tp,
                     std::mem::size_of::<TOKEN_PRIVILEGES>() as u32,
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),

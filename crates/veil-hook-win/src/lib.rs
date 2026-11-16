@@ -133,8 +133,14 @@ unsafe extern "system" fn worker_thread(_param: *mut core::ffi::c_void) -> u32 {
     }
 }
 
+/// Win32 DLL entry point, called by the OS loader with a valid module handle.
+///
+/// # Safety
+/// The `instance` handle is provided by the loader and must be a valid module
+/// handle for the duration of the call. This function must not be called
+/// directly by Rust code.
 #[no_mangle]
-pub extern "system" fn DllMain(
+pub unsafe extern "system" fn DllMain(
     instance: HMODULE,
     reason: u32,
     _reserved: *mut core::ffi::c_void,

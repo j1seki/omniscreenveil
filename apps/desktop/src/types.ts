@@ -3,6 +3,8 @@
 
 export type ProtectionMode = "exclusion" | "surface" | "strict_hide";
 
+export type Theme = "dark" | "light";
+
 export type AutoArm = "off" | "capture_app_running" | "always";
 
 export type Platform = "windows" | "mac_os" | "linux_x11" | "linux_wayland";
