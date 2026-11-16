@@ -395,7 +395,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "veil-canary"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "veil-core",
@@ -404,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "veil-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -424,7 +424,7 @@ dependencies = [
 
 [[package]]
 name = "veil-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -433,14 +433,14 @@ dependencies = [
 
 [[package]]
 name = "veil-hook-win"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "veil-protect"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "thiserror",
@@ -449,7 +449,7 @@ dependencies = [
 
 [[package]]
 name = "veil-protect-linux"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "thiserror",
@@ -463,7 +463,7 @@ dependencies = [
 
 [[package]]
 name = "veil-protect-macos"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -475,7 +475,7 @@ dependencies = [
 
 [[package]]
 name = "veil-protect-wayland"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "veil-protect-win"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "png",
@@ -501,7 +501,7 @@ dependencies = [
 
 [[package]]
 name = "veil-surface"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "thiserror",
@@ -510,7 +510,7 @@ dependencies = [
 
 [[package]]
 name = "veil-verify"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "thiserror",
