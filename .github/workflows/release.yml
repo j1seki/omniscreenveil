@@ -98,7 +98,7 @@ jobs:
           $hook = "resources/veil_hook_win.dll"
           if (-not (Test-Path $hook)) { throw "hook helper not found at $hook" }
           Copy-Item $hook $stage
-          $version = (Get-Content "src-tauri/tauri.conf.json" | ConvertFrom-Json).version
+          $version = (Get-Content "tauri.conf.json" | ConvertFrom-Json).version
           $archive = "target/${{ matrix.target }}/release/OmniScreenVeil_${version}_portable_windows_x64.zip"
           Compress-Archive -Path "$stage/*" -DestinationPath $archive -Force
           Write-Host "portable zip: $archive"
