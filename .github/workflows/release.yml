@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing tag to publish (defaults to the selected ref)
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -127,6 +132,7 @@ jobs:
       - name: Attach to GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
           files: artifacts/**/*
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
