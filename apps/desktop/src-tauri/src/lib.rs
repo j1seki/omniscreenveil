@@ -17,9 +17,12 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager, State};
 use veil_core::capability::{PlatformCapabilities, ProtectionMode};
 use veil_core::ids::{AppKey, RuleId, WindowId};
+use veil_core::recovery::{
+    intended_snapshot, matches_live, snapshot as recovery_snapshot, RecoveryJournal, RecoveryRecord,
+};
 use veil_core::state::AppliedProtection;
-use veil_core::{AutoArm, ConfigStore, FillStyle, Profile, Size};
-use veil_protect::{Engine, TickReport};
+use veil_core::{plan, AutoArm, ConfigStore, FillStyle, Profile, Size};
+use veil_protect::{Engine, ProtectionBackend, TickReport};
 use veil_verify::{SyntheticCapture, SyntheticDesktop, VerificationHarness, VerificationRun};
 
 use backend::{BackendInfo, DesktopBackend};
@@ -30,6 +33,8 @@ pub struct AppState {
     info: BackendInfo,
     /// User intent from "Arm now"/"Release all"; auto-arm can override it.
     armed: bool,
+    /// Journal of protections with OS-visible side effects for crash recovery.
+    recovery: RecoveryJournal,
 }
 
 impl AppState {
@@ -38,6 +43,69 @@ impl AppState {
             .save(&self.engine.profile)
             .map_err(|err| err.to_string())
     }
+
+    /// Persist the current applied set so a crash can be recovered on next start.
+    fn journal(&self) {
+        let windows = match self.engine.backend.list_windows() {
+            Ok(windows) => windows,
+            Err(_) => return,
+        };
+        let records = recovery_snapshot(&self.engine.applied(), &windows);
+        if let Err(err) = self.recovery.save(&records) {
+            eprintln!("veil: could not update recovery journal: {err}");
+        }
+    }
+}
+
+/// Release protections left behind by a previous, crashed session.
+///
+/// Returns the number of records that were actually restored. Records for
+/// windows that no longer exist (or whose handle was reused by another PID)
+/// are dropped without touching anything.
+fn recover_previous_session(backend: &mut DesktopBackend, journal: &RecoveryJournal) -> usize {
+    let records: Vec<RecoveryRecord> = match journal.load() {
+        Ok(records) => records,
+        Err(err) => {
+            eprintln!("veil: could not read recovery journal: {err}");
+            return 0;
+        }
+    };
+    if records.is_empty() {
+        return 0;
+    }
+    let mut windows = match backend.list_windows() {
+        Ok(windows) => windows,
+        Err(err) => {
+            eprintln!("veil: cannot recover, inventory unavailable: {err}");
+            return 0;
+        }
+    };
+    let own_pid = std::process::id();
+    windows.retain(|window| window.pid != own_pid);
+    let mut restored = 0;
+    let mut pending = Vec::new();
+    for record in &records {
+        if !matches_live(record, &windows) {
+            continue;
+        }
+        match ProtectionBackend::release(backend, record.window) {
+            Ok(()) => {
+                eprintln!(
+                    "veil: recovered window {} left protected by a previous session",
+                    record.window
+                );
+                restored += 1;
+            }
+            Err(err) => {
+                eprintln!("veil: could not recover {}: {err}", record.window);
+                pending.push(record.clone());
+            }
+        }
+    }
+    if let Err(err) = journal.save(&pending) {
+        eprintln!("veil: could not update recovery journal: {err}");
+    }
+    restored
 }
 
 #[derive(Debug, Serialize)]
@@ -151,7 +219,31 @@ fn protect_all(state: State<'_, Mutex<AppState>>, mode: ProtectionMode) -> Resul
         .collect();
     state.engine.profile.protect_all(&windows, mode);
     state.armed = true;
+    let reconcile = plan(&state.engine.profile, &windows, &state.engine.applied());
+    let mut records = state.recovery.load().map_err(|err| err.to_string())?;
+    for mode in [ProtectionMode::StrictHide, ProtectionMode::Exclusion] {
+        let intended: Vec<_> = reconcile
+            .apply
+            .iter()
+            .filter(|intent| intent.mode == mode)
+            .filter_map(|intent| windows.iter().find(|w| w.id == intent.window).cloned())
+            .collect();
+        records.extend(intended_snapshot(&intended, mode));
+    }
+    records.retain(|record| {
+        windows
+            .iter()
+            .any(|w| w.id == record.window && w.pid == record.pid)
+    });
+    records.sort_by_key(|record| record.window);
+    records.dedup_by_key(|record| record.window);
+    records.sort_by_key(|record| record.window);
+    state
+        .recovery
+        .save(&records)
+        .map_err(|err| err.to_string())?;
     state.engine.tick(&windows);
+    state.journal();
     state.engine.drain_events();
     state.save()?;
     Ok(state.engine.profile.clone())
@@ -228,7 +320,39 @@ fn tick(state: State<'_, Mutex<AppState>>) -> Result<TickReport, String> {
     let mut state = lock(&state)?;
     let windows = state.engine.backend.list_windows()?;
     state.armed = true;
-    Ok(state.engine.tick(&windows))
+    let reconcile = plan(&state.engine.profile, &windows, &state.engine.applied());
+    let mut journal_records: Vec<_> = state
+        .recovery
+        .load()
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .filter(|record| {
+            windows
+                .iter()
+                .any(|w| w.id == record.window && w.pid == record.pid)
+        })
+        .collect();
+    for mode in [ProtectionMode::StrictHide, ProtectionMode::Exclusion] {
+        let intended: Vec<_> = reconcile
+            .apply
+            .iter()
+            .filter(|intent| intent.mode == mode)
+            .filter_map(|intent| windows.iter().find(|w| w.id == intent.window).cloned())
+            .collect();
+        if !intended.is_empty() {
+            journal_records.extend(intended_snapshot(&intended, mode));
+        }
+    }
+    journal_records.sort_by_key(|record| record.window);
+    journal_records.dedup_by_key(|record| record.window);
+    journal_records.sort_by_key(|record| record.window);
+    state
+        .recovery
+        .save(&journal_records)
+        .map_err(|err| err.to_string())?;
+    let report = state.engine.tick(&windows);
+    state.journal();
+    Ok(report)
 }
 
 #[tauri::command]
@@ -237,8 +361,49 @@ fn set_auto_arm(state: State<'_, Mutex<AppState>>, auto_arm: AutoArm) -> Result<
     state.engine.profile.auto_arm = auto_arm;
     if let Ok(windows) = state.engine.backend.list_windows() {
         let explicit = state.armed;
+        let reconcile = plan(&state.engine.profile, &windows, &state.engine.applied());
+        let mut intended = Vec::new();
+        for mode in [ProtectionMode::StrictHide, ProtectionMode::Exclusion] {
+            intended.extend(
+                reconcile
+                    .apply
+                    .iter()
+                    .filter(|intent| intent.mode == mode)
+                    .filter_map(|intent| windows.iter().find(|w| w.id == intent.window))
+                    .map(|w| veil_core::RecoveryRecord {
+                        window: w.id,
+                        pid: w.pid,
+                        mode,
+                        saved_at_unix: 0,
+                    }),
+            );
+        }
+        let mut records: Vec<_> = state
+            .recovery
+            .load()
+            .map_err(|err| err.to_string())?
+            .into_iter()
+            .filter(|record| {
+                windows
+                    .iter()
+                    .any(|w| w.id == record.window && w.pid == record.pid)
+            })
+            .collect();
+        records.retain(|record| {
+            !reconcile
+                .apply
+                .iter()
+                .any(|intent| intent.window == record.window)
+        });
+        records.extend(intended);
+        records.sort_by_key(|record| record.window);
+        state
+            .recovery
+            .save(&records)
+            .map_err(|err| err.to_string())?;
         state.engine.auto_tick(&windows, explicit);
         state.engine.drain_events();
+        state.journal();
     }
     state.save()?;
     Ok(state.engine.profile.clone())
@@ -252,6 +417,28 @@ fn release_all(state: State<'_, Mutex<AppState>>) -> Result<ReleaseReport, Strin
     state.engine.profile.auto_arm = AutoArm::Off;
     state.save()?;
     let results = state.engine.release_all();
+    let mut pending = Vec::new();
+    for (window, error) in &results {
+        if error.is_some() {
+            let applied = state.engine.applied();
+            if let Some(record) = applied.iter().find(|record| record.window == *window) {
+                if let Ok(windows) = state.engine.backend.list_windows() {
+                    if let Some(w) = windows.iter().find(|w| w.id == *window) {
+                        pending.push(RecoveryRecord {
+                            window: *window,
+                            pid: w.pid,
+                            mode: record.mode,
+                            saved_at_unix: 0,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    state
+        .recovery
+        .save(&pending)
+        .map_err(|err| err.to_string())?;
     state.engine.drain_events();
     let failed = results
         .iter()
@@ -428,9 +615,35 @@ fn release_all_now(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<Mutex<AppState>>() {
         if let Ok(mut guard) = state.lock() {
             guard.armed = false;
+            let old_policy = guard.engine.profile.auto_arm;
+            guard.engine.profile.auto_arm = AutoArm::Off;
+            let _ = guard.save();
             guard.engine.release_all();
             guard.engine.drain_events();
+            guard.engine.profile.auto_arm = old_policy;
             let _ = guard.save();
+            let pending: Vec<_> = if let Ok(windows) = guard.engine.backend.list_windows() {
+                guard
+                    .engine
+                    .applied()
+                    .into_iter()
+                    .filter(|applied| RecoveryRecord::needs_restore(applied.mode))
+                    .filter_map(|applied| {
+                        windows
+                            .iter()
+                            .find(|w| w.id == applied.window)
+                            .map(|w| RecoveryRecord {
+                                window: applied.window,
+                                pid: w.pid,
+                                mode: applied.mode,
+                                saved_at_unix: 0,
+                            })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let _ = guard.recovery.save(&pending);
         }
     }
     let _ = app.emit("veil://changed", ());
@@ -441,8 +654,36 @@ fn arm_now(app: &tauri::AppHandle) {
         if let Ok(mut guard) = state.lock() {
             guard.armed = true;
             if let Ok(windows) = guard.engine.backend.list_windows() {
+                let reconcile = plan(&guard.engine.profile, &windows, &guard.engine.applied());
+                let mut journal_records: Vec<_> = guard
+                    .recovery
+                    .load()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|record| matches_live(record, &windows))
+                    .collect();
+                for mode in [ProtectionMode::StrictHide, ProtectionMode::Exclusion] {
+                    let intended: Vec<_> = reconcile
+                        .apply
+                        .iter()
+                        .filter(|intent| intent.mode == mode)
+                        .filter_map(|intent| {
+                            windows.iter().find(|w| w.id == intent.window).cloned()
+                        })
+                        .collect();
+                    if !intended.is_empty() {
+                        journal_records.retain(|record| {
+                            !intended.iter().any(|window| window.id == record.window)
+                        });
+                        journal_records.extend(intended_snapshot(&intended, mode));
+                    }
+                }
+                journal_records.sort_by_key(|record| record.window);
+                journal_records.dedup_by_key(|record| record.window);
+                let _ = guard.recovery.save(&journal_records);
                 guard.engine.tick(&windows);
                 guard.engine.drain_events();
+                guard.journal();
             }
         }
     }
@@ -500,6 +741,7 @@ fn start_auto_monitor(app: tauri::AppHandle) {
             guard.engine.auto_tick(&windows, explicit)
         };
         let events = guard.engine.drain_events();
+        guard.journal();
         if report
             .tick
             .as_ref()
@@ -602,19 +844,91 @@ pub fn run() {
                     Profile::new()
                 }
             };
-            let (backend, info) = DesktopBackend::detect();
+            let (mut backend, info) = DesktopBackend::detect();
+            let recovery =
+                RecoveryJournal::new(store.parent().unwrap_or_else(|| std::path::Path::new(".")));
+            let recovered = recover_previous_session(&mut backend, &recovery);
+            if recovered > 0 {
+                eprintln!("veil: restored {recovered} window(s) from previous session");
+            }
+            let mut recovery_records = recovery.load().unwrap_or_default();
+            if let Ok(windows) = backend.list_windows() {
+                recovery_records.retain(|record| matches_live(record, &windows));
+            } else {
+                recovery_records.clear();
+            }
             let mut engine = Engine::new(profile, backend);
             if engine.profile.auto_arm != AutoArm::Off {
                 if let Ok(windows) = engine.backend.list_windows() {
+                    let reconcile = plan(&engine.profile, &windows, &engine.applied());
+                    let mut intended: Vec<_> = recovery_records
+                        .clone()
+                        .into_iter()
+                        .filter(|record| matches_live(record, &windows))
+                        .collect();
+                    for mode in [ProtectionMode::StrictHide, ProtectionMode::Exclusion] {
+                        intended.extend(
+                            reconcile
+                                .apply
+                                .iter()
+                                .filter(|intent| intent.mode == mode)
+                                .filter_map(|intent| windows.iter().find(|w| w.id == intent.window))
+                                .map(|w| veil_core::RecoveryRecord {
+                                    window: w.id,
+                                    pid: w.pid,
+                                    mode,
+                                    saved_at_unix: 0,
+                                }),
+                        );
+                    }
+                    intended.sort_by_key(|record| record.window);
+                    intended.dedup_by_key(|record| record.window);
+                    let _ = recovery.save(&intended);
                     engine.auto_tick(&windows, false);
                     engine.drain_events();
+                    let applied = recovery_snapshot(&engine.applied(), &windows);
+                    let applied_ids: std::collections::BTreeSet<_> =
+                        applied.iter().map(|record| record.window).collect();
+                    let mut records = applied;
+                    records.extend(intended.into_iter().filter(|record| {
+                        !applied_ids.contains(&record.window)
+                            && !engine.profile.rules.iter().any(|rule| {
+                                rule.enabled
+                                    && RecoveryRecord::needs_restore(rule.mode)
+                                    && windows
+                                        .iter()
+                                        .any(|w| w.id == record.window && rule.matches(w))
+                            })
+                    }));
+                    let armed_ids: std::collections::BTreeSet<_> = records
+                        .iter()
+                        .filter(|record| {
+                            engine.profile.rules.iter().any(|rule| {
+                                rule.enabled
+                                    && RecoveryRecord::needs_restore(rule.mode)
+                                    && windows
+                                        .iter()
+                                        .any(|w| w.id == record.window && rule.matches(w))
+                            })
+                        })
+                        .map(|record| record.window)
+                        .collect();
+                    records.retain(|record| armed_ids.contains(&record.window));
+                    records.sort_by_key(|record| record.window);
+                    records.dedup_by_key(|record| record.window);
+                    let _ = recovery.save(&records);
+                } else {
+                    let _ = recovery.save(&recovery_records);
                 }
+            } else {
+                let _ = recovery.save(&recovery_records);
             }
             app.manage(Mutex::new(AppState {
                 engine,
                 store: ConfigStore::new(store),
                 info,
                 armed: false,
+                recovery,
             }));
 
             let open = MenuItem::with_id(app, "open", "Open OmniScreenVeil", true, None::<&str>)?;
