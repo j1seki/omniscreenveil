@@ -2,6 +2,7 @@ import {
   Activity,
   CircleHelp,
   Command,
+  Download,
   LayoutDashboard,
   ListFilter,
   Moon,
@@ -22,7 +23,8 @@ export type Page =
   | "surface"
   | "audit"
   | "rules"
-  | "capabilities";
+  | "capabilities"
+  | "updates";
 
 const NAV: {
   id: Page;
@@ -37,6 +39,7 @@ const NAV: {
   { id: "audit", label: "Canary audit", icon: ScanSearch, group: "Verify", keys: "4" },
   { id: "rules", label: "Rules & automation", icon: Waypoints, group: "Verify", keys: "5" },
   { id: "capabilities", label: "Capabilities", icon: Settings2, group: "Verify", keys: "6" },
+  { id: "updates", label: "Updates", icon: Download, group: "System", keys: "7" },
 ];
 
 function NavItem({
@@ -44,12 +47,14 @@ function NavItem({
   icon: Icon,
   label,
   keys,
+  dot,
   onClick,
 }: {
   active: boolean;
   icon: React.ComponentType<{ className?: string }>;
   label: string;
   keys: string;
+  dot?: boolean;
   onClick: () => void;
 }) {
   return (
@@ -68,6 +73,12 @@ function NavItem({
       )}
       <Icon className={cn("size-4 shrink-0", active ? "text-accent" : "")} />
       <span className="flex-1 text-left">{label}</span>
+      {dot && (
+        <span
+          className="size-1.5 shrink-0 rounded-full bg-accent"
+          title="An update is available"
+        />
+      )}
       <kbd className="hidden font-mono text-[10px] text-faint group-hover:inline">
         ⌘{keys}
       </kbd>
@@ -84,6 +95,8 @@ export function Sidebar({
   backend,
   armed,
   protectedCount,
+  version,
+  updateAvailable,
   onToggleArm,
   onOpenSurface,
 }: {
@@ -95,6 +108,8 @@ export function Sidebar({
   backend: BackendInfo | null;
   armed: boolean;
   protectedCount: number;
+  version: string;
+  updateAvailable: boolean;
   onToggleArm: () => void;
   onOpenSurface: () => void;
 }) {
@@ -112,7 +127,7 @@ export function Sidebar({
           <p className="truncate text-[13px] font-semibold tracking-tight text-text">
             OmniScreenVeil
           </p>
-          <p className="truncate text-[10px] text-faint">Capture privacy · v0.1</p>
+          <p className="truncate text-[10px] text-faint">Capture privacy · v{version || "…"}</p>
         </div>
         <button
           type="button"
@@ -157,6 +172,7 @@ export function Sidebar({
                   icon={item.icon}
                   label={item.label}
                   keys={item.keys}
+                  dot={item.id === "updates" && updateAvailable}
                   onClick={() => onNavigate(item.id)}
                 />
               </div>
@@ -222,7 +238,7 @@ export function Sidebar({
 
         <div className="mt-2 flex items-center justify-center gap-1.5 text-[10px] text-faint">
           <Activity className="size-3" />
-          100% local · no telemetry
+          No telemetry · signed updates
         </div>
       </div>
     </aside>

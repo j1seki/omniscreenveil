@@ -33,7 +33,8 @@ This is a Phase 0/1 working implementation, not a finished store release.
 - The Linux/X11 backend is validated end to end against a real X server
   (`Xvfb`) with pixel assertions.
 - The Tauri desktop app builds and runs; it is verified under Xvfb in this
-  repository.
+  repository. It ships a signed updater with `stable` and `beta` channels,
+  automatic update checks and an explicit install/restart step.
 - The Windows and macOS backends compile behind their target gates and have
   Phase 0 probes, but still need runtime validation on real Windows and macOS
   machines. Run the probes in [`docs/phase-0-spikes.md`](docs/phase-0-spikes.md)
@@ -65,6 +66,7 @@ apps/
 platform/macos       Swift package: CGWindowList, Accessibility, ScreenCaptureKit
 docs/                support matrix, threat model, verification, ADRs
 research/            product research and constraints
+tools/               release helpers (updater manifest generator)
 ```
 
 The CLI and the desktop app consume the same crates. No protection policy lives
@@ -116,6 +118,40 @@ swift build -c release
 .build/release/veilmac-spike list
 swift test
 ```
+
+### Updates and release channels
+
+The desktop app uses Tauri's signed updater. Both channels are backed by the
+same GitHub Releases:
+
+- **stable** — tags without a pre-release suffix (`v0.2.0`). The workflow
+  publishes a normal GitHub release with `latest.json`; the app reads
+  `releases/latest/download/latest.json`.
+- **beta** — SemVer pre-release tags (`v0.2.0-rc.1`, `v0.2.0-beta.2`). The
+  workflow marks them as GitHub pre-releases and refreshes `latest.json` on the
+  rolling `updater-beta` release, which is what the beta endpoint reads.
+
+`releases/latest` deliberately excludes pre-releases, so a beta can never be
+served to stable users. Switching from beta to stable does not downgrade an
+installed beta; the next newer stable release replaces it.
+
+Release bundles are signed and verified before installation. The public key is
+checked into `tauri.conf.json`; the private key and its password must be stored
+as the `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+repository secrets. A local release build needs the same two variables:
+
+```sh
+export TAURI_SIGNING_PRIVATE_KEY="$(cat "$HOME/.tauri/omniscreenveil.key")"
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(cat "$HOME/.tauri/omniscreenveil.key.password")"
+cd apps/desktop/src-tauri
+pnpm tauri build
+```
+
+Back up the private key and password. Losing them means existing installs can
+never receive another update; leaking the private key lets someone sign a
+malicious update. The release workflow also refuses to publish when a tag does
+not match the version in `tauri.conf.json`, and derives the channel from SemVer,
+so a workflow dispatch from a branch cannot mark an RC as stable "latest".
 
 ## How protection works
 
@@ -177,7 +213,8 @@ compositor exposes per-window capture exclusion.
 ## Repository conventions
 
 - GPL-3.0-or-later. See [`LICENSE`](LICENSE) and [`NOTICE.md`](NOTICE.md).
-- No telemetry and no network access in the app.
+- No telemetry. The only network access is the signed update check against
+  GitHub Releases when automatic checks are enabled or you press Check now.
 - Format with `cargo fmt`, lint with `cargo clippy -- -D warnings`.
 - Every `Native` capability in the matrix must have a capture test that proves
   it. If a test cannot run on a machine, it reports a skip, not a pass.

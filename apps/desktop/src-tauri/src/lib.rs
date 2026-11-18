@@ -11,10 +11,11 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use base64::Engine as _;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager, State};
+use tauri_plugin_updater::UpdaterExt;
 use veil_core::capability::{PlatformCapabilities, ProtectionMode};
 use veil_core::ids::{AppKey, RuleId, WindowId};
 use veil_core::recovery::{
@@ -787,6 +788,177 @@ fn open_surface(app: tauri::AppHandle) -> Result<(), String> {
     open_surface_window(&app)
 }
 
+/// Update channel selected by the user. Endpoints are chosen at runtime so
+/// stable and beta manifests never leak into each other.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateChannel {
+    Stable,
+    Beta,
+}
+
+impl UpdateChannel {
+    fn endpoint(self) -> &'static str {
+        match self {
+            Self::Stable => {
+                "https://github.com/j1seki/omniscreenveil/releases/latest/download/latest.json"
+            }
+            Self::Beta => {
+                "https://github.com/j1seki/omniscreenveil/releases/download/updater-beta/latest.json"
+            }
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct UpdateInfo {
+    current_version: String,
+    version: String,
+    date_unix: Option<i64>,
+    notes: Option<String>,
+    channel: UpdateChannel,
+}
+
+#[derive(Clone, Serialize)]
+pub struct UpdateProgress {
+    phase: &'static str,
+    downloaded: u64,
+    total: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UpdateCheck {
+    update: Option<UpdateInfo>,
+    /// False when the channel has no `latest.json` yet (for example a brand
+    /// new stable channel). That is different from "no newer version".
+    manifest_found: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InstallOutcome {
+    version: String,
+}
+
+fn update_builder(
+    app: &tauri::AppHandle,
+    channel: UpdateChannel,
+) -> Result<tauri_plugin_updater::Updater, String> {
+    let endpoint: tauri::Url = channel
+        .endpoint()
+        .parse()
+        .map_err(|err| format!("invalid update endpoint: {err}"))?;
+    let builder = app
+        .updater_builder()
+        .endpoints(vec![endpoint])
+        .map_err(|err| err.to_string())?
+        .timeout(Duration::from_secs(30));
+
+    // The Windows installer exits the process directly, so the normal
+    // RunEvent::Exit cleanup never runs. Release protections before the
+    // installer is spawned.
+    #[cfg(windows)]
+    let builder = {
+        let app = app.clone();
+        builder.on_before_exit(move || release_all_now(&app))
+    };
+
+    builder.build().map_err(|err| err.to_string())
+}
+
+async fn check_update_inner(
+    app: &tauri::AppHandle,
+    channel: UpdateChannel,
+) -> Result<(Option<tauri_plugin_updater::Update>, bool), String> {
+    let updater = update_builder(app, channel)?;
+    match updater.check().await {
+        Ok(update) => Ok((update, true)),
+        // A 404 on a newly enabled channel only means no manifest is
+        // published yet; that is not an error and not "up to date" either.
+        Err(tauri_plugin_updater::Error::ReleaseNotFound) => Ok((None, false)),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+#[tauri::command]
+async fn check_update(
+    app: tauri::AppHandle,
+    channel: UpdateChannel,
+) -> Result<UpdateCheck, String> {
+    let (update, manifest_found) = check_update_inner(&app, channel).await?;
+    Ok(UpdateCheck {
+        update: update.map(|update| UpdateInfo {
+            current_version: update.current_version.clone(),
+            version: update.version.clone(),
+            date_unix: update.date.map(|date| date.unix_timestamp()),
+            notes: update.body.clone(),
+            channel,
+        }),
+        manifest_found,
+    })
+}
+
+#[tauri::command]
+async fn install_update(
+    app: tauri::AppHandle,
+    channel: UpdateChannel,
+) -> Result<InstallOutcome, String> {
+    let (Some(update), _) = check_update_inner(&app, channel).await? else {
+        return Err("No update is available for this channel.".to_string());
+    };
+    let version = update.version.clone();
+    let progress_app = app.clone();
+    let mut downloaded = 0u64;
+    update
+        .download_and_install(
+            move |chunk, total| {
+                downloaded = downloaded.saturating_add(chunk as u64);
+                let _ = progress_app.emit(
+                    "veil://update-progress",
+                    UpdateProgress {
+                        phase: "downloading",
+                        downloaded,
+                        total,
+                    },
+                );
+            },
+            {
+                let app = app.clone();
+                move || {
+                    let _ = app.emit(
+                        "veil://update-progress",
+                        UpdateProgress {
+                            phase: "installing",
+                            downloaded: 0,
+                            total: None,
+                        },
+                    );
+                }
+            },
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    let _ = app.emit(
+        "veil://update-progress",
+        UpdateProgress {
+            phase: "installed",
+            downloaded: 0,
+            total: None,
+        },
+    );
+    Ok(InstallOutcome { version })
+}
+
+/// Restart after a Linux/macOS update. On Windows the installer owns the
+/// restart, and the app has already exited.
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) {
+    // `AppHandle::restart` does not always run the RunEvent::Exit handler,
+    // depending on which thread calls it. Release first so a protected
+    // window is never left hidden or excluded across the restart.
+    release_all_now(&app);
+    app.restart();
+}
+
 pub fn run() {
     use tauri_plugin_global_shortcut::{
         Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
@@ -794,6 +966,7 @@ pub fn run() {
     let toggle_shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyV);
 
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
@@ -823,6 +996,9 @@ pub fn run() {
             preview,
             verify,
             open_surface,
+            check_update,
+            install_update,
+            restart_app,
         ])
         .setup(move |app| {
             // Resolve the profile location through Tauri so the portable

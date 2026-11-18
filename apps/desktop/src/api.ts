@@ -6,11 +6,14 @@
 // "preview data".
 
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
+import pkg from "../package.json";
 import type {
   AppKey,
   AppliedProtection,
   AutoArm,
   Capabilities,
+  InstallOutcome,
   Inventory,
   Platform,
   Profile,
@@ -19,6 +22,8 @@ import type {
   Rule,
   SurfacePreview,
   TickReport,
+  UpdateChannel,
+  UpdateCheck,
   VerificationRun,
   WindowInfo,
 } from "./types";
@@ -469,4 +474,34 @@ export async function openSurface(): Promise<void> {
 export async function verify(): Promise<VerificationRun> {
   if (!IN_TAURI) return mockVerify();
   return invoke<VerificationRun>("verify");
+}
+
+// ---------------------------------------------------------------------------
+// updates
+// ---------------------------------------------------------------------------
+
+export async function appVersion(): Promise<string> {
+  if (!IN_TAURI) return `${pkg.version} (preview)`;
+  return getVersion();
+}
+
+export async function checkForUpdate(
+  channel: UpdateChannel,
+): Promise<UpdateCheck> {
+  if (!IN_TAURI) return { update: null, manifest_found: false };
+  return invoke<UpdateCheck>("check_update", { channel });
+}
+
+export async function installUpdate(
+  channel: UpdateChannel,
+): Promise<InstallOutcome> {
+  if (!IN_TAURI) {
+    throw new Error("Updates can only be installed in the desktop app.");
+  }
+  return invoke<InstallOutcome>("install_update", { channel });
+}
+
+export async function restartApp(): Promise<void> {
+  if (!IN_TAURI) return;
+  return invoke<void>("restart_app");
 }

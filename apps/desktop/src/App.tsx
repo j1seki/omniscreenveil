@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   CircleHelp,
+  Download,
   LayoutDashboard,
   ListFilter,
   Moon,
@@ -18,6 +19,7 @@ import {
 } from "lucide-react";
 import * as api from "./api";
 import { useTheme } from "./lib/theme";
+import { useUpdater } from "./lib/updater";
 import type {
   AutoArm,
   Capabilities,
@@ -38,6 +40,7 @@ import { Toaster, type Toast } from "./components/Toaster";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { AuditPage, CapabilitiesPage, RulesPage, SurfacePage } from "./pages/InspectorPages";
 import { OverviewPage } from "./pages/OverviewPage";
+import { UpdatesPage } from "./pages/UpdatesPage";
 import { WindowsPage } from "./pages/WindowsPage";
 
 export default function App() {
@@ -67,6 +70,8 @@ export default function App() {
     setToasts((t) => [...t, { id, message, kind }]);
     window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3600);
   }, [toastId]);
+
+  const updater = useUpdater(notify);
 
   const refresh = useCallback(async (label = "refresh", quiet = false) => {
     setBusy(label);
@@ -249,16 +254,18 @@ export default function App() {
     { id: "nav-audit", label: "Go to Canary audit", group: "Navigation", icon: ScanSearch, shortcut: `${MOD}4`, run: () => setPage("audit") },
     { id: "nav-rules", label: "Go to Rules & automation", group: "Navigation", icon: Waypoints, shortcut: `${MOD}5`, run: () => setPage("rules") },
     { id: "nav-capabilities", label: "Go to Capabilities", group: "Navigation", icon: Settings2, shortcut: `${MOD}6`, run: () => setPage("capabilities") },
+    { id: "nav-updates", label: "Go to Updates", group: "Navigation", icon: Download, shortcut: `${MOD}7`, run: () => setPage("updates") },
     { id: "arm", label: isArmed ? "Disarm protection" : "Arm protection", group: "Protection", icon: isArmed ? ShieldOff : Shield, keywords: "toggle veil shield", run: () => { void (isArmed ? releaseEverything() : protectedCount ? armNow() : protectAllWindows()); } },
     { id: "protect-all", label: "Protect all windows", group: "Protection", icon: Sparkles, keywords: "bulk select everything", run: () => { void protectAllWindows(); } },
     { id: "open-surface", label: "Open Surface window", group: "Protection", icon: PanelsTopLeft, keywords: "share screen", run: () => { void api.openSurface().catch((e) => notify(String(e), "error")); } },
     { id: "audit", label: "Run canary audit", group: "Verification", icon: ScanSearch, keywords: "synthetic test pixel", run: () => { setPage("audit"); void runVerification(); } },
     { id: "refresh", label: "Refresh inventory", group: "Verification", icon: RefreshCw, shortcut: `${MOD}R`, run: () => { void refresh(); } },
     { id: "theme", label: `Switch to ${theme === "dark" ? "light" : "dark"} theme`, group: "Preferences", icon: theme === "dark" ? Sun : Moon, shortcut: `${MOD}D`, run: toggleTheme },
+    { id: "updates", label: "Check for updates", group: "Preferences", icon: Download, keywords: "upgrade release stable beta", run: () => { setPage("updates"); void updater.check("manual"); } },
     { id: "shortcuts", label: "Show keyboard shortcuts", group: "Preferences", icon: CircleHelp, keywords: "help keys", run: () => setPaletteOpen(true) },
     { id: "clear", label: "Purge all rules", group: "Danger zone", icon: Trash2, danger: true, keywords: "reset clear delete", run: () => setConfirm({ title: "Purge all rules?", description: "This removes every persistent rule and releases all protection. This cannot be undone.", label: "Purge rules", danger: true, action: () => { void clearRules(); } }) },
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [isArmed, protectedCount, theme, refresh, toggleTheme, notify]);
+  ], [isArmed, protectedCount, theme, refresh, toggleTheme, notify, updater.check]);
 
   const openPalette = useCallback(() => setPaletteOpen(true), []);
 
@@ -268,9 +275,9 @@ export default function App() {
       if (mod && e.key.toLowerCase() === "k") { e.preventDefault(); setPaletteOpen((o) => !o); return; }
       if (mod && e.key.toLowerCase() === "d") { e.preventDefault(); toggleTheme(); return; }
       if (mod && e.key.toLowerCase() === "r") { e.preventDefault(); void refresh(); return; }
-      if (mod && /^[1-6]$/.test(e.key)) {
+      if (mod && /^[1-7]$/.test(e.key)) {
         e.preventDefault();
-        setPage((["overview", "windows", "surface", "audit", "rules", "capabilities"] as Page[])[Number(e.key) - 1]);
+        setPage((["overview", "windows", "surface", "audit", "rules", "capabilities", "updates"] as Page[])[Number(e.key) - 1]);
         return;
       }
       if (e.key === "Escape") { setPaletteOpen(false); setConfirm(null); }
@@ -297,6 +304,8 @@ export default function App() {
           backend={inv?.backend ?? null}
           armed={isArmed}
           protectedCount={protectedCount}
+          version={updater.currentVersion}
+          updateAvailable={Boolean(updater.update)}
           onToggleArm={toggleArm}
           onOpenSurface={() => { void api.openSurface().catch((e) => notify(String(e), "error")); }}
         />
@@ -324,6 +333,24 @@ export default function App() {
               </BackendBanner>
             )}
             {error && <div className="mt-2"><BackendBanner tone="error" title="Command failed">{error}</BackendBanner></div>}
+            {updater.update && page !== "updates" && (
+              <div className="mt-2 flex items-center gap-2.5 rounded-lg border border-accent/25 bg-accent-soft px-3 py-2 text-[11px] leading-snug text-muted">
+                <Download className="size-3.5 shrink-0 text-accent" />
+                <span className="min-w-0 flex-1 truncate">
+                  <strong className="font-semibold text-accent">
+                    OmniScreenVeil {updater.update.version}
+                  </strong>{" "}
+                  is available on the {updater.update.channel} channel.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setPage("updates")}
+                  className="shrink-0 rounded-md border border-accent/30 px-2 py-1 text-[11px] font-medium text-accent transition-colors hover:bg-accent/10"
+                >
+                  Review update
+                </button>
+              </div>
+            )}
           </div>
 
           <main className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
@@ -397,6 +424,27 @@ export default function App() {
               />
             )}
             {page === "capabilities" && <CapabilitiesPage caps={caps} matrix={matrix} />}
+            {page === "updates" && (
+              <UpdatesPage
+                supported={updater.supported}
+                currentVersion={updater.currentVersion}
+                channel={updater.channel}
+                setChannel={updater.setChannel}
+                autoCheck={updater.autoCheck}
+                setAutoCheck={updater.setAutoCheck}
+                lastChecked={updater.lastChecked}
+                update={updater.update}
+                manifestFound={updater.manifestFound}
+                checking={updater.checking}
+                installing={updater.installing}
+                progress={updater.progress}
+                installedVersion={updater.installedVersion}
+                error={updater.error}
+                check={() => { void updater.check("manual"); }}
+                install={() => { void updater.install(); }}
+                restart={() => { void updater.restart(); }}
+              />
+            )}
           </main>
 
           <footer className="flex h-8 shrink-0 items-center justify-between border-t border-border bg-app px-6 text-[10px] text-faint">
@@ -407,12 +455,12 @@ export default function App() {
               <kbd className="rounded border border-border bg-panel px-1.5 py-0.5 font-mono">{MOD}D</kbd>
               theme
               <span className="text-border-strong">·</span>
-              <kbd className="rounded border border-border bg-panel px-1.5 py-0.5 font-mono">{MOD}1–6</kbd>
+              <kbd className="rounded border border-border bg-panel px-1.5 py-0.5 font-mono">{MOD}1–7</kbd>
               navigate
             </span>
             <span className="flex items-center gap-1.5">
               <ShieldCheck className="size-3 text-success" />
-              100% local · no telemetry
+              No telemetry · signed GitHub updates
             </span>
           </footer>
         </div>

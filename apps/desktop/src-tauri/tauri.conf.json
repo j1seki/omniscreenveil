@@ -28,6 +28,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": ["appimage", "deb", "nsis", "dmg"],
     "category": "Utility",
     "shortDescription": "Selective screen-capture privacy",
@@ -55,6 +56,14 @@
         "installMode": "currentUser",
         "languages": ["English"],
         "displayLanguageSelector": false
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJCNURCMkVBNkNCQzVGRDkKUldUWlg3eHM2ckpkSzdwYTU1OVdFYWQ4NWN6cC8ydjdidHNWOHRPTldxOE0yWU9LYkxJYVYvdS8K",
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

@@ -15,15 +15,69 @@ permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.release_tag || github.ref_name }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  BETA_MANIFEST_TAG: updater-beta
 
 jobs:
+  # Resolve and validate the release once. Every later job uses the same tag
+  # and channel, including workflow_dispatch runs started from a branch.
+  prepare:
+    name: prepare release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      channel: ${{ steps.release.outputs.channel }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Resolve tag and channel
+        id: release
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.release_tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-$REF_NAME}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Release tag '$tag' is not a supported vMAJOR.MINOR.PATCH[-pre] tag."
+            exit 1
+          fi
+
+          version="${tag#v}"
+          config_version="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+          if [[ "$version" != "$config_version" ]]; then
+            echo "::error::Tag $tag does not match tauri.conf.json version $config_version."
+            exit 1
+          fi
+
+          # SemVer pre-release suffix = beta channel. Everything else is stable.
+          # This is the single source of truth for GitHub's prerelease flag.
+          if [[ "$version" == *-* ]]; then
+            channel="beta"
+            prerelease="true"
+          else
+            channel="stable"
+            prerelease="false"
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "Releasing $tag on the $channel channel"
+
   build:
     name: build (${{ matrix.os }})
+    needs: prepare
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -40,13 +94,25 @@ jobs:
             bundles: "dmg"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Verify updater signing secret
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set. Add the updater private key as a repository secret."
+            exit 1
+          fi
 
       - name: Install Linux webview + X11 dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
-            librsvg2-dev libssl-dev pkg-config libx11-dev
+            librsvg2-dev libssl-dev pkg-config libx11-dev patchelf
 
       - name: Swift static library (macOS)
         if: runner.os == 'macOS'
@@ -84,11 +150,16 @@ jobs:
         run: pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
         env:
           VEIL_MACOS_STATIC_LIB: ${{ github.workspace }}/platform/macos/.build/release/libVeilMac.a
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Portable Windows build (portable config, no installer)
         if: runner.os == 'Windows'
         working-directory: apps/desktop
         run: pnpm tauri build --target ${{ matrix.target }} --no-bundle --config src-tauri/tauri.portable.conf.json
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Zip portable Windows build
         if: runner.os == 'Windows'
@@ -115,24 +186,66 @@ jobs:
           name: bundle-${{ matrix.target }}
           path: |
             apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.AppImage
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.AppImage.sig
             apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.dmg
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.app.tar.gz
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.app.tar.gz.sig
             apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.exe
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.exe.sig
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.msi
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/**/*.msi.sig
             apps/desktop/src-tauri/target/${{ matrix.target }}/release/*.zip
 
   release:
     name: publish release
-    needs: build
+    needs: [prepare, build]
     runs-on: ubuntu-latest
+    # Serialize publishes so two beta tags cannot race on the rolling manifest.
+    concurrency:
+      group: release-publish
+      cancel-in-progress: false
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: Attach to GitHub release
-        uses: softprops/action-gh-release@v2
+      - name: Generate signed updater manifest
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_CHANNEL: ${{ needs.prepare.outputs.channel }}
+        run: node tools/release-manifest.mjs artifacts artifacts/latest.json
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ inputs.release_tag || github.ref_name }}
+          tag_name: ${{ needs.prepare.outputs.tag }}
           files: artifacts/**/*
           generate_release_notes: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ needs.prepare.outputs.prerelease }}
+          # Stable releases own `releases/latest`; beta releases must not.
+          make_latest: ${{ needs.prepare.outputs.channel == 'stable' }}
+
+      # `releases/latest/download/latest.json` is the stable endpoint.
+      # Beta needs a stable URL that always points at the newest pre-release,
+      # so every beta publish refreshes this rolling, non-latest release.
+      - name: Refresh rolling beta manifest
+        if: needs.prepare.outputs.channel == 'beta'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$BETA_MANIFEST_TAG" >/dev/null 2>&1; then
+            gh release edit "$BETA_MANIFEST_TAG" --prerelease \
+              --title "Beta update channel (rolling)"
+          else
+            gh release create "$BETA_MANIFEST_TAG" --prerelease \
+              --title "Beta update channel (rolling)" \
+              --notes "Rolling manifest for the in-app beta updater. Installers live on the version tags; only latest.json is stored here."
+          fi
+          gh release upload "$BETA_MANIFEST_TAG" artifacts/latest.json --clobber

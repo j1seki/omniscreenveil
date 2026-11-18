@@ -14,6 +14,7 @@ const TITLES: Record<Page, { title: string; subtitle: string }> = {
   audit: { title: "Canary audit", subtitle: "Synthetic pixel self-test of the veil compositor" },
   rules: { title: "Rules & automation", subtitle: "Persistent protection policies and auto-arm" },
   capabilities: { title: "Capabilities", subtitle: "What each operating system can actually do" },
+  updates: { title: "Updates", subtitle: "Stable and beta release channels" },
 };
 
 export function TitleBar({

@@ -5,6 +5,32 @@ export type ProtectionMode = "exclusion" | "surface" | "strict_hide";
 
 export type Theme = "dark" | "light";
 
+export type UpdateChannel = "stable" | "beta";
+
+export interface UpdateInfo {
+  current_version: string;
+  version: string;
+  date_unix: number | null;
+  notes: string | null;
+  channel: UpdateChannel;
+}
+
+export interface UpdateCheck {
+  update: UpdateInfo | null;
+  /** False when the channel has no manifest yet, as opposed to no newer version. */
+  manifest_found: boolean;
+}
+
+export interface UpdateProgress {
+  phase: "downloading" | "installing" | "installed";
+  downloaded: number;
+  total: number | null;
+}
+
+export interface InstallOutcome {
+  version: string;
+}
+
 export type AutoArm = "off" | "capture_app_running" | "always";
 
 export type Platform = "windows" | "mac_os" | "linux_x11" | "linux_wayland";
