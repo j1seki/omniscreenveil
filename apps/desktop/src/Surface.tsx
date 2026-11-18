@@ -9,7 +9,7 @@ import * as api from "./api";
 /// cannot recurse into its own output.
 export default function Surface() {
   const [src, setSrc] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [unavailable, setUnavailable] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -20,11 +20,11 @@ export default function Surface() {
         const frame = await api.preview();
         if (!alive) return;
         setSrc(`data:image/png;base64,${frame.png_base64}`);
-        setError(null);
-      } catch (err) {
+        setUnavailable(false);
+      } catch {
         if (alive) {
           setSrc(null);
-          setError(String(err));
+          setUnavailable(true);
         }
       } finally {
         if (alive) timer = window.setTimeout(poll, 1500);
@@ -40,8 +40,8 @@ export default function Surface() {
 
   return (
     <div className="surface">
-      {error ? (
-        <div className="surface-error" role="alert">Frame unavailable: {error}</div>
+      {unavailable ? (
+        <div className="surface-status" role="status">Frame unavailable · retrying…</div>
       ) : src ? (
         <img src={src} alt="Veil Surface capture" />
       ) : (

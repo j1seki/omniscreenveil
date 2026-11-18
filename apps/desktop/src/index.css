@@ -206,15 +206,3 @@ button:disabled { cursor: not-allowed; }
   font-family: var(--font-mono);
   font-size: 12px;
 }
-.surface-error {
-  position: absolute;
-  inset-inline: 12px;
-  bottom: 12px;
-  padding: 8px 12px;
-  border: 1px solid rgba(244, 115, 140, 0.4);
-  border-radius: 8px;
-  background: rgba(244, 115, 140, 0.14);
-  color: #fff;
-  font-family: var(--font-mono);
-  font-size: 12px;
-}

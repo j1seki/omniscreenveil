@@ -267,6 +267,12 @@ The desktop app also provides an **Open window** action (and tray entry) that
 opens a dedicated, chrome-free `OmniScreenVeil Surface` window — that second
 window is what you select in Discord, Zoom, OBS or a browser share dialog.
 
+On backends that mask by window position, the desktop app compares protected
+window bounds before and after capture. If they differ, the Surface drops the
+frame and retries. These samples are not atomic: a window that moves away and
+back between samples can still be missed. If the Surface keeps retrying,
+render a preview in the main window to see the capture error privately.
+
 On Wayland the compositor owns geometry and capture. The sway/Hyprland backend
 combines two public surfaces: `grim` (wlr-screencopy) for frames and the
 compositor's own IPC (`swaymsg -t get_tree`, `hyprctl clients -j`) for window

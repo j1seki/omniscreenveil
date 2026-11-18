@@ -557,6 +557,19 @@ mod surface_tests {
     use veil_protect::MemoryBackend;
 
     #[test]
+    fn geometry_masks_reject_changed_targets_but_ignore_unprotected_motion() {
+        let before = veil_core::testutil::demo_windows();
+        let targets = BTreeSet::from([before[0].id]);
+        let mut after = before.clone();
+        after[1].bounds.x += 100;
+        assert!(mask_geometry_stable(&before, &targets, &after, &targets));
+        let expanded = BTreeSet::from([before[0].id, before[1].id]);
+        assert!(!mask_geometry_stable(&before, &targets, &after, &expanded));
+        after[0].bounds.x += 1;
+        assert!(!mask_geometry_stable(&before, &targets, &after, &targets));
+    }
+
+    #[test]
     fn surface_covers_new_matches_before_monitor_ticks_but_not_when_disarmed() {
         let app = AppKey::MacBundle("example.demo".into());
         let mut profile = Profile::new();
@@ -624,7 +637,7 @@ fn render_preview(state: &Mutex<AppState>) -> Result<SurfacePreview, String> {
     } else {
         Vec::new()
     };
-    let (source_frame, source_label) = match state.engine.backend.capture_frame() {
+    let (mut source_frame, source_label) = match state.engine.backend.capture_frame() {
         Some(frame) => {
             let label = if own_windows.is_empty() {
                 "live capture"
@@ -636,6 +649,15 @@ fn render_preview(state: &Mutex<AppState>) -> Result<SurfacePreview, String> {
         None if !state.info.live => (synthetic_desktop(&windows), "simulated desktop"),
         None => return Err("Live desktop capture failed. The Surface is unavailable; check capture permissions and platform support.".into()),
     };
+    // Geometry-based masks are sampled separately from the pixels. Discard
+    // the frame if a protected window appeared, moved or resized in between.
+    if state.info.live {
+        let latest = state.engine.backend.list_windows()?;
+        let latest_targets = surface_targets(&state.engine, state.armed, &latest);
+        if !mask_geometry_stable(&windows, &surface, &latest, &latest_targets) {
+            return Err("Protected windows changed during capture; retrying.".into());
+        }
+    }
     drop(state);
 
     let mut plan = veil_surface::SurfacePlan::new(source_frame.size(), FillStyle::veiled());
@@ -652,8 +674,24 @@ fn render_preview(state: &Mutex<AppState>) -> Result<SurfacePreview, String> {
     for own in own_windows {
         plan = plan.exclude(own);
     }
-    let rendered = veil_surface::render(&source_frame, &plan);
-    surface_preview(&rendered, masked, source_label)
+    veil_surface::apply_exclusions(&mut source_frame, &plan);
+    surface_preview(&source_frame, masked, source_label)
+}
+
+fn mask_geometry_stable(
+    before: &[WindowInfo],
+    before_targets: &BTreeSet<WindowId>,
+    after: &[WindowInfo],
+    after_targets: &BTreeSet<WindowId>,
+) -> bool {
+    let geometry = |windows: &[WindowInfo], targets: &BTreeSet<WindowId>| {
+        windows
+            .iter()
+            .filter(|w| targets.contains(&w.id))
+            .map(|w| (w.id, w.bounds))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    geometry(before, before_targets) == geometry(after, after_targets)
 }
 
 fn surface_preview(
