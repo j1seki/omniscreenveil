@@ -33,18 +33,11 @@ function preferredMode(caps: Capabilities | null): ProtectionMode {
   return "strict_hide";
 }
 
-function StatusCell({ win, applied }: { win: WindowInfo; applied?: AppliedProtection }) {
-  if (!win.visible) {
-    return (
-      <span className="inline-flex items-center gap-1.5 text-[11px] text-warning">
-        <span className="size-1.5 rounded-full bg-warning" /> Hidden
-      </span>
-    );
-  }
+function StatusCell({ win, applied, configured }: { win: WindowInfo; applied?: AppliedProtection; configured: boolean }) {
   if (!applied) {
     return (
       <span className="inline-flex items-center gap-1.5 text-[11px] text-faint">
-        <span className="size-1.5 rounded-full bg-border-strong" /> Exposed
+        <span className="size-1.5 rounded-full bg-border-strong" /> {configured ? "Configured" : win.visible ? "No rule" : "Off-screen"}
       </span>
     );
   }
@@ -125,10 +118,10 @@ export function WindowsPage({
             <strong className="font-semibold text-text">{counts.all}</strong> windows
           </span>
           <span className="text-muted">
-            <strong className="font-semibold text-success">{counts.protected}</strong> protected
+          <strong className="font-semibold text-text">{counts.protected}</strong> configured
           </span>
           <span className="text-muted">
-            <strong className="font-semibold text-text">{counts.exposed}</strong> exposed
+            <strong className="font-semibold text-text">{counts.exposed}</strong> without rules
           </span>
           {counts.capture > 0 && (
             <span className="text-muted">
@@ -186,8 +179,8 @@ export function WindowsPage({
             {(
               [
                 ["all", "All"],
-                ["protected", "Protected"],
-                ["exposed", "Exposed"],
+                ["protected", "Configured"],
+                ["exposed", "No rule"],
                 ["capture", "Capture apps"],
               ] as [Filter, string][]
             ).map(([id, label]) => (
@@ -209,10 +202,10 @@ export function WindowsPage({
           <SlidersHorizontal className="size-3.5 text-faint" />
         </div>
 
-        <div className="grid grid-cols-[minmax(0,1.7fr)_minmax(0,1fr)_170px_120px] gap-3 border-b border-border bg-app/40 px-4 py-2 text-[10px] font-semibold uppercase tracking-[0.06em] text-faint max-lg:grid-cols-[minmax(0,1fr)_150px_100px]">
+        <div className="grid grid-cols-[minmax(0,1fr)_160px_100px_70px] gap-3 border-b border-border bg-app/40 px-4 py-2 text-[10px] font-semibold uppercase tracking-[0.06em] text-faint">
           <span>Application / window</span>
-          <span className="max-lg:hidden">Mode</span>
-          <span className="max-lg:hidden">Status</span>
+          <span>Mode</span>
+          <span>Status</span>
           <span className="text-right">Protect</span>
         </div>
 
@@ -241,7 +234,7 @@ export function WindowsPage({
               <div
                 key={win.id}
                 className={cn(
-                  "grid grid-cols-[minmax(0,1.7fr)_minmax(0,1fr)_170px_120px] items-center gap-3 px-4 py-2.5 transition-colors hover:bg-hover/50 max-lg:grid-cols-[minmax(0,1fr)_150px_100px]",
+                  "grid grid-cols-[minmax(0,1fr)_160px_100px_70px] items-center gap-3 px-4 py-2.5 transition-colors hover:bg-hover/50",
                   enabled && "bg-accent-soft/[0.25]",
                 )}
               >
@@ -264,7 +257,7 @@ export function WindowsPage({
                   </div>
                 </div>
 
-                <div className="max-lg:hidden">
+                <div>
                   <div className="inline-flex rounded-md border border-border bg-app p-0.5">
                     {MODES.map((entry) => {
                       const level = caps?.modes[entry.id];
@@ -295,8 +288,8 @@ export function WindowsPage({
                   </div>
                 </div>
 
-                <div className="max-lg:hidden">
-                  <StatusCell win={win} applied={applied} />
+                <div>
+                  <StatusCell win={win} applied={applied} configured={enabled} />
                   {applied?.status.status === "failed" && (
                     <Badge variant="error" className="mt-1 text-[9px]">retrying</Badge>
                   )}

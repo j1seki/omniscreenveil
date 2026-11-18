@@ -1,20 +1,25 @@
 // Build the injected Windows helper and stage it where the app expects it.
 //
-// The helper is only meaningful on Windows; on other hosts this is a no-op so
-// `pnpm tauri dev/build` keeps working unchanged.
+// Build the host's native helper before Tauri compiles Rust.
 
 import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-if (process.platform !== "win32") {
-  process.exit(0);
-}
-
 const here = dirname(fileURLToPath(import.meta.url));
 const desktop = resolve(here, "..");
 const root = resolve(desktop, "../..");
+if (process.platform === "darwin") {
+  if (!process.env.VEIL_MACOS_STATIC_LIB) {
+    execFileSync("swift", ["build", "-c", "release"], {
+      cwd: join(root, "platform", "macos"),
+      stdio: "inherit",
+    });
+  }
+  process.exit(0);
+}
+if (process.platform !== "win32") process.exit(0);
 const srcTauri = join(desktop, "src-tauri");
 const triple = process.env.TAURI_ENV_TARGET_TRIPLE;
 

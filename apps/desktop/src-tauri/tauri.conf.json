@@ -32,7 +32,7 @@
     "targets": ["appimage", "deb", "nsis", "dmg"],
     "category": "Utility",
     "shortDescription": "Selective screen-capture privacy",
-    "longDescription": "Protect selected windows from screen capture. The Veil Surface masks protected windows in a shareable window on every platform; Windows additionally verifies OS-level capture exclusion.",
+    "longDescription": "Share a dedicated Veil Surface that filters or masks selected windows. OS-level capture exclusion is experimental and available only on Windows.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -47,6 +47,9 @@
       "appimage": {
         "bundleMediaFramework": true
       }
+    },
+    "macOS": {
+      "minimumSystemVersion": "14.0"
     },
     "windows": {
       "webviewInstallMode": {

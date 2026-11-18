@@ -75,17 +75,46 @@ impl MacBackend {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    pub fn screen_recording_granted() -> bool {
+        ffi::screen_recording_granted()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn request_screen_recording() {
+        ffi::request_screen_recording();
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn request_accessibility() {
+        ffi::request_accessibility();
+    }
+
     /// Capture the main display through ScreenCaptureKit.
     ///
     /// The Swift helper excludes this process's own windows from the filter, so
     /// the Veil Surface cannot recurse into itself.
     pub fn capture_root(&self) -> Result<veil_surface::Frame, MacError> {
+        self.capture_filtered(&BTreeSet::new())
+    }
+
+    /// Exclude windows from our ScreenCaptureKit capture, not from other apps' captures.
+    pub fn capture_filtered(
+        &self,
+        excluded: &BTreeSet<WindowId>,
+    ) -> Result<veil_surface::Frame, MacError> {
         #[cfg(target_os = "macos")]
         {
-            self.inner.capture_display(0)
+            let ids = excluded
+                .iter()
+                .map(|id| u32::try_from(id.0))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|err| MacError::Helper(format!("invalid window ID: {err}")))?;
+            self.inner.capture_display(0, &ids)
         }
         #[cfg(not(target_os = "macos"))]
         {
+            let _ = excluded;
             Err(MacError::NotMacOs)
         }
     }
@@ -153,7 +182,7 @@ impl ProtectionBackend for MacBackend {
 
 #[cfg(target_os = "macos")]
 mod ffi {
-    use std::ffi::{c_char, CStr, CString};
+    use std::ffi::{c_char, CStr};
 
     use veil_core::geometry::Rect;
     use veil_core::ids::{AppKey, WindowId};
@@ -169,12 +198,29 @@ mod ffi {
         fn veil_macos_free_string(ptr: *mut c_char);
         fn veil_macos_list_windows_json() -> *mut c_char;
         fn veil_macos_accessibility_trusted() -> i32;
+        fn veil_macos_request_accessibility() -> i32;
+        fn veil_macos_screen_recording_granted() -> i32;
+        fn veil_macos_request_screen_recording() -> i32;
         fn veil_macos_capture_display(
             display_id: u32,
+            excluded_ids: *const u32,
+            excluded_count: usize,
             out_width: *mut u32,
             out_height: *mut u32,
         ) -> *mut u8;
         fn veil_macos_free_buffer(ptr: *mut u8);
+    }
+
+    pub fn screen_recording_granted() -> bool {
+        unsafe { veil_macos_screen_recording_granted() == 1 }
+    }
+
+    pub fn request_screen_recording() {
+        unsafe { veil_macos_request_screen_recording() };
+    }
+
+    pub fn request_accessibility() {
+        unsafe { veil_macos_request_accessibility() };
     }
 
     #[derive(serde::Deserialize)]
@@ -219,10 +265,22 @@ mod ffi {
 
         /// Capture the display through ScreenCaptureKit and convert the BGRA
         /// buffer into a `veil_surface::Frame`.
-        pub fn capture_display(&self, display_id: u32) -> Result<veil_surface::Frame, MacError> {
+        pub fn capture_display(
+            &self,
+            display_id: u32,
+            excluded: &[u32],
+        ) -> Result<veil_surface::Frame, MacError> {
             let mut width: u32 = 0;
             let mut height: u32 = 0;
-            let ptr = unsafe { veil_macos_capture_display(display_id, &mut width, &mut height) };
+            let ptr = unsafe {
+                veil_macos_capture_display(
+                    display_id,
+                    excluded.as_ptr(),
+                    excluded.len(),
+                    &mut width,
+                    &mut height,
+                )
+            };
             if ptr.is_null() {
                 return Err(MacError::Helper(last_error()));
             }
@@ -285,8 +343,6 @@ mod ffi {
         if code == 0 {
             return Ok(());
         }
-        let message = last_error();
-        let _ = CString::new(message.clone());
-        Err(message)
+        Err(last_error())
     }
 }

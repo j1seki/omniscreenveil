@@ -197,7 +197,7 @@ export function Sidebar({
             />
           </div>
           <p className="mt-1.5 text-[12px] font-medium text-text">
-            {armed ? `${protectedCount} window${protectedCount === 1 ? "" : "s"} veiled` : "Currently disarmed"}
+            {armed ? `${protectedCount} active rule match${protectedCount === 1 ? "" : "es"}` : "Currently disarmed"}
           </p>
           <p className="mt-0.5 text-[11px] text-faint">
             {live ? `${backend?.name} driver active` : "Preview / simulation mode"}

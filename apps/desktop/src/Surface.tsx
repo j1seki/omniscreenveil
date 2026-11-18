@@ -40,12 +40,13 @@ export default function Surface() {
 
   return (
     <div className="surface">
-      {src ? (
-        <img src={src} alt="Veil Surface: protected windows are masked" />
+      {error ? (
+        <div className="surface-error" role="alert">Frame unavailable: {error}</div>
+      ) : src ? (
+        <img src={src} alt="Veil Surface capture" />
       ) : (
         <div className="surface-status">Waiting for the first frame…</div>
       )}
-      {error && <div className="surface-error">{error}</div>}
     </div>
   );
 }

@@ -47,7 +47,7 @@ impl ProtectionMode {
                 "Window remains usable locally and is removed from capture by the OS."
             }
             ProtectionMode::Surface => {
-                "Share the Veil Surface window; protected windows are masked in it."
+                "Share the Veil Surface window; protected windows are filtered or masked in it."
             }
             ProtectionMode::StrictHide => {
                 "Window is hidden locally while protection is armed and restored afterwards."
@@ -141,7 +141,7 @@ impl PlatformCapabilities {
                             .into(),
                     },
                 );
-                modes.insert(ProtectionMode::Surface, CapabilityLevel::Partial { detail: "Requires macOS 14 and Screen Recording permission; display scaling and multi-monitor layouts need runtime validation.".into() });
+                modes.insert(ProtectionMode::Surface, CapabilityLevel::Partial { detail: "Requires macOS 14 and Screen Recording permission. ScreenCaptureKit filters selected windows from this app’s main-display capture only; share the Veil Surface, not your desktop.".into() });
                 modes.insert(ProtectionMode::StrictHide, CapabilityLevel::Partial { detail: "Requires Accessibility permission; restoration after a crash is not guaranteed.".into() });
             }
             Platform::LinuxX11 => {

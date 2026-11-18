@@ -11,8 +11,8 @@ pretend otherwise.
 
 | Mode | Promise | Costs |
 |---|---|---|
-| **Exclusion** | Protected window stays visible and interactive locally, but is absent from every capture. | Requires OS compositor cooperation and, on Windows, a helper loaded into the selected process. |
-| **Veil Surface** | The audience sees a window we render; protected windows are checker-filled there. | The audience must share the Surface window, not the whole desktop. Capture runs continuously. |
+| **Exclusion** | Protected window stays visible and interactive locally while compatible capture paths omit it. | Requires OS compositor cooperation and, on Windows, a helper loaded into the selected process. |
+| **Veil Surface** | Protected windows are filtered out or masked in the window we render. | Select the Surface window in the share picker, not the whole desktop. |
 | **Strict hide** | The protected window is hidden on the local desktop for the session. | You cannot use the window while protected. Restored on release. |
 
 ## Platform matrix
@@ -45,7 +45,7 @@ pretend otherwise.
 |---|---|
 | Windows Exclusion | Pixel test: canary visible before arming, absent after `WDA_EXCLUDEFROMCAPTURE` is applied, restored on release, while the window remains `IsWindowVisible`. |
 | Windows strict hide | `ShowWindow(SW_HIDE)` removes the canary from a desktop capture; `SW_SHOW` restores it. |
-| macOS Surface | ScreenCaptureKit capture with the window's rectangle masked by the compositor; canary absent. |
+| macOS Surface | ScreenCaptureKit filters selected window IDs out of the main-display capture. Verify a visible canary window disappears from the Surface and reappears after release on a consented Mac. |
 | macOS strict hide | Accessibility `AXMinimized` removes the window from the capture and `AXMinimized=false` restores it; requires consented permission. |
 | X11 Surface | `crates/veil-protect-linux/tests/x11_end_to_end.rs`: canary present in root capture, removed by `SurfacePlan`, strict hide removes it, remap restores it. |
 | X11 strict hide | Same test, using `XUnmapWindow` / `XMapWindow`. |
@@ -67,7 +67,7 @@ pretend otherwise.
 | Platform | Permission | When asked | If denied |
 |---|---|---|---|
 | Windows | none for display affinity; the hook is loaded only into the selected app | on first arm | Exclusion fails visibly; Surface / strict hide still available |
-| macOS | Screen Recording (capture), Accessibility (strict hide) | when the feature is first used | Surface or strict hide reports `Inconclusive` / fails; the app keeps running in the remaining modes |
+| macOS | Screen Recording (capture), Accessibility (strict hide) | when requested from the desktop app’s permission panel | the affected feature is unavailable; the app starts and can still use the other feature if its permission is granted |
 | X11 | access to `$DISPLAY` | on connect | simulated backend, labelled in the UI |
 | Wayland | portal screen-cast consent | when the Surface starts | partial/unsupported, labelled in the UI |
 

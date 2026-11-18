@@ -91,7 +91,7 @@ jobs:
             bundles: "nsis"
           - os: macos-15
             target: aarch64-apple-darwin
-            bundles: "dmg"
+            bundles: "app,dmg"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -145,13 +145,51 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build
 
-      - name: Build bundles
+      - name: Build bundles (Linux and Windows)
+        if: runner.os != 'macOS'
         working-directory: apps/desktop/src-tauri
         run: pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Build and notarize the macOS app and sign the DMG
+        if: runner.os == 'macOS'
+        working-directory: apps/desktop/src-tauri
+        shell: bash
         env:
           VEIL_MACOS_STATIC_LIB: ${{ github.workspace }}/platform/macos/.build/release/libVeilMac.a
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing $name repository secret. See the macOS release instructions."
+              missing=1
+            fi
+          done
+          (( missing == 0 )) || exit 1
+          if [[ "$APPLE_SIGNING_IDENTITY" != 'Developer ID Application: '* ]]; then
+            echo "::error::APPLE_SIGNING_IDENTITY must be a Developer ID Application identity."
+            exit 1
+          fi
+          pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+
+      - name: Notarize the DMG and verify the release artifacts
+        if: runner.os == 'macOS'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bash tools/verify-macos-release.sh "apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle"
 
       - name: Portable Windows build (portable config, no installer)
         if: runner.os == 'Windows'

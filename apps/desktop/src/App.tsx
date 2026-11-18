@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   CircleHelp,
   Download,
@@ -27,6 +27,7 @@ import type {
   Profile,
   ProtectionMode,
   SurfacePreview,
+  TickReport,
   VerificationRun,
   WindowInfo,
 } from "./types";
@@ -34,6 +35,7 @@ import { findRuleForWindow } from "./types";
 import { BackendBanner } from "./components/BackendBanner";
 import { CommandPalette, type Command as CommandType } from "./components/CommandPalette";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { MacPermissionPanel } from "./components/MacPermissionPanel";
 import { Sidebar, type Page } from "./components/Sidebar";
 import { MOD, TitleBar } from "./components/TitleBar";
 import { Toaster, type Toast } from "./components/Toaster";
@@ -51,6 +53,10 @@ export default function App() {
   const [inv, setInv] = useState<Inventory | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [preview, setPreview] = useState<SurfacePreview | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [rendering, setRendering] = useState(false);
+  const previewRequest = useRef(0);
+  const refreshRequest = useRef(0);
   const [verification, setVerification] = useState<VerificationRun | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -74,25 +80,44 @@ export default function App() {
   const updater = useUpdater(notify);
 
   const refresh = useCallback(async (label = "refresh", quiet = false) => {
-    setBusy(label);
+    const request = ++refreshRequest.current;
+    if (!quiet) setError(null);
     try {
-      const [nextInventory, nextProfile, nextPreview] = await Promise.all([
-        api.inventory(),
-        api.getProfile(),
-        api.preview().then((value) => ({ value, error: null as string | null })).catch((err) => ({ value: null, error: String(err) })),
-      ]);
+      const [nextInventory, nextProfile] = await Promise.all([api.inventory(), api.getProfile()]);
+      if (request !== refreshRequest.current) return;
       setInv(nextInventory);
       setProfile(nextProfile);
-      setPreview(nextPreview.value);
-      setError(nextPreview.error);
-      if (!quiet && nextPreview.error) notify(nextPreview.error, "error");
     } catch (err) {
-      setError(String(err));
-      if (!quiet) notify(String(err), "error");
-    } finally {
-      setBusy(null);
+      if (request === refreshRequest.current) {
+        setError(String(err));
+        if (!quiet) notify(`${label}: ${String(err)}`, "error");
+      }
     }
   }, [notify]);
+
+  const invalidatePreview = useCallback(() => {
+    ++previewRequest.current;
+    setPreview(null);
+    setPreviewError(null);
+    setRendering(false);
+  }, []);
+
+  async function renderPreview() {
+    const request = ++previewRequest.current;
+    setPreview(null);
+    setPreviewError(null);
+    setRendering(true);
+    try {
+      const frame = await api.preview();
+      if (request === previewRequest.current) setPreview(frame);
+    } catch (err) {
+      if (request === previewRequest.current) setPreviewError(String(err));
+    } finally {
+      if (request === previewRequest.current) setRendering(false);
+    }
+  }
+
+  const refreshPermissions = useCallback(() => { void refresh("permissions", true); }, [refresh]);
 
   useEffect(() => {
     let cancelled = false;
@@ -115,28 +140,41 @@ export default function App() {
 
   useEffect(() => {
     if (!api.IN_TAURI) return;
+    let cancelled = false;
     let unlisten: (() => void) | undefined;
     void (async () => {
       const { listen } = await import("@tauri-apps/api/event");
-      unlisten = await listen("veil://changed", () => { void refresh("event", true); });
-    })();
-    return () => unlisten?.();
-  }, [refresh]);
+      const stop = await listen("veil://changed", () => {
+        invalidatePreview();
+        void refresh("event", true);
+      });
+      if (cancelled) stop();
+      else unlisten = stop;
+    })().catch((err) => { if (!cancelled) setError(String(err)); });
+    return () => { cancelled = true; unlisten?.(); };
+  }, [refresh, invalidatePreview]);
+
+  function reportProtection(report: TickReport, message: string) {
+    const failure = report.failed.length
+      ? `${report.failed.length} protection changes failed: ${report.failed[0][1]}`
+      : null;
+    setError(failure);
+    notify(failure ?? message, failure ? "error" : "info");
+  }
 
   async function setProtection(window: WindowInfo, enabled: boolean, mode: ProtectionMode) {
     setBusy(`window-${window.id}`);
+    invalidatePreview();
     try {
       if (enabled) {
         await api.addAppRule(window.app, mode);
-        notify(`${window.app_name} protected with ${mode.replace("_", " ")}`);
       } else {
         await api.removeAppRules(window.app);
         await api.removeWindowRules(window.id);
-        notify(`${window.app_name} rule removed`, "info");
       }
-      await api.tick();
+      const report = await api.tick();
       await refresh("tick", true);
-      setError(null);
+      reportProtection(report, `${window.app_name} ${enabled ? "rule saved" : "rule removed"}`);
     } catch (err) {
       setError(String(err));
       notify(String(err), "error");
@@ -147,11 +185,11 @@ export default function App() {
 
   async function armNow() {
     setBusy("arm");
+    invalidatePreview();
     try {
       const report = await api.tick();
       await refresh("tick", true);
-      setError(null);
-      notify(`Protection armed · ${report.applied.length} applied`);
+      reportProtection(report, `Protection armed · ${report.applied.length + report.unchanged} active`);
     } catch (err) {
       setError(String(err));
       notify(String(err), "error");
@@ -162,12 +200,11 @@ export default function App() {
 
   async function protectAllWindows() {
     setBusy("protect-all");
+    invalidatePreview();
     try {
-      const mode: ProtectionMode = caps?.modes.exclusion.level !== "unsupported" ? "exclusion" : "surface";
-      await api.protectAll(mode);
+      const report = await api.protectAll(defaultMode);
       await refresh("protect-all", true);
-      setError(null);
-      notify("All protectable windows covered");
+      reportProtection(report, `Protection armed · ${report.applied.length + report.unchanged} active`);
     } catch (err) {
       setError(String(err));
       notify(String(err), "error");
@@ -178,6 +215,7 @@ export default function App() {
 
   async function releaseEverything() {
     setBusy("release");
+    invalidatePreview();
     try {
       const report = await api.releaseAll();
       await refresh("release", true);
@@ -209,9 +247,11 @@ export default function App() {
 
   async function clearRules() {
     setBusy("reset");
+    invalidatePreview();
     try {
       await api.resetProfile();
-      await api.releaseAll();
+      const report = await api.releaseAll();
+      if (report.failed.length) throw new Error(`Rules cleared, but release failed: ${report.failed.join("; ")}`);
       await refresh("reset", true);
       setError(null);
       notify("All rules purged and windows restored", "info");
@@ -225,6 +265,7 @@ export default function App() {
 
   async function setAutoArm(v: AutoArm) {
     setBusy("auto-arm");
+    invalidatePreview();
     try {
       await api.setAutoArm(v);
       await refresh("auto-arm", true);
@@ -238,8 +279,9 @@ export default function App() {
     }
   }
 
-  const windows = inv?.windows ?? [];
-  const protectedCount = windows.filter((w) => Boolean(findRuleForWindow(profile, w))).length;
+  const defaultMode: ProtectionMode = caps?.modes.exclusion && caps.modes.exclusion.level !== "unsupported" ? "exclusion" : "surface";
+  const hasRules = profile?.rules.some((rule) => rule.enabled) ?? false;
+  const appliedCount = inv?.applied.filter((record) => record.status.status === "applied").length ?? 0;
   const isArmed = Boolean(inv?.armed) || (inv?.applied.length ?? 0) > 0;
   const emptyInventory: Inventory = {
     windows: [],
@@ -247,7 +289,7 @@ export default function App() {
     applied: [],
   };
 
-  const commands = useMemo<CommandType[]>(() => [
+  const commands: CommandType[] = [
     { id: "nav-overview", label: "Go to Overview", group: "Navigation", icon: LayoutDashboard, shortcut: `${MOD}1`, run: () => setPage("overview") },
     { id: "nav-windows", label: "Go to Windows", group: "Navigation", icon: ListFilter, shortcut: `${MOD}2`, run: () => setPage("windows") },
     { id: "nav-surface", label: "Go to Veil Surface", group: "Navigation", icon: PanelsTopLeft, shortcut: `${MOD}3`, run: () => setPage("surface") },
@@ -255,7 +297,7 @@ export default function App() {
     { id: "nav-rules", label: "Go to Rules & automation", group: "Navigation", icon: Waypoints, shortcut: `${MOD}5`, run: () => setPage("rules") },
     { id: "nav-capabilities", label: "Go to Capabilities", group: "Navigation", icon: Settings2, shortcut: `${MOD}6`, run: () => setPage("capabilities") },
     { id: "nav-updates", label: "Go to Updates", group: "Navigation", icon: Download, shortcut: `${MOD}7`, run: () => setPage("updates") },
-    { id: "arm", label: isArmed ? "Disarm protection" : "Arm protection", group: "Protection", icon: isArmed ? ShieldOff : Shield, keywords: "toggle veil shield", run: () => { void (isArmed ? releaseEverything() : protectedCount ? armNow() : protectAllWindows()); } },
+    { id: "arm", label: isArmed ? "Disarm protection" : "Arm protection", group: "Protection", icon: isArmed ? ShieldOff : Shield, keywords: "toggle veil shield", run: toggleArm },
     { id: "protect-all", label: "Protect all windows", group: "Protection", icon: Sparkles, keywords: "bulk select everything", run: () => { void protectAllWindows(); } },
     { id: "open-surface", label: "Open Surface window", group: "Protection", icon: PanelsTopLeft, keywords: "share screen", run: () => { void api.openSurface().catch((e) => notify(String(e), "error")); } },
     { id: "audit", label: "Run canary audit", group: "Verification", icon: ScanSearch, keywords: "synthetic test pixel", run: () => { setPage("audit"); void runVerification(); } },
@@ -264,8 +306,7 @@ export default function App() {
     { id: "updates", label: "Check for updates", group: "Preferences", icon: Download, keywords: "upgrade release stable beta", run: () => { setPage("updates"); void updater.check("manual"); } },
     { id: "shortcuts", label: "Show keyboard shortcuts", group: "Preferences", icon: CircleHelp, keywords: "help keys", run: () => setPaletteOpen(true) },
     { id: "clear", label: "Purge all rules", group: "Danger zone", icon: Trash2, danger: true, keywords: "reset clear delete", run: () => setConfirm({ title: "Purge all rules?", description: "This removes every persistent rule and releases all protection. This cannot be undone.", label: "Purge rules", danger: true, action: () => { void clearRules(); } }) },
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [isArmed, protectedCount, theme, refresh, toggleTheme, notify, updater.check]);
+  ];
 
   const openPalette = useCallback(() => setPaletteOpen(true), []);
 
@@ -287,9 +328,10 @@ export default function App() {
   }, [refresh, toggleTheme]);
 
   function toggleArm() {
+    if (busy || !profile) return;
     if (isArmed) void releaseEverything();
-    else if (protectedCount) void armNow();
-    else void protectAllWindows();
+    else if (hasRules) void armNow();
+    else setPage("windows");
   }
 
   return (
@@ -303,7 +345,7 @@ export default function App() {
           onOpenPalette={openPalette}
           backend={inv?.backend ?? null}
           armed={isArmed}
-          protectedCount={protectedCount}
+          protectedCount={appliedCount}
           version={updater.currentVersion}
           updateAvailable={Boolean(updater.update)}
           onToggleArm={toggleArm}
@@ -354,17 +396,21 @@ export default function App() {
           </div>
 
           <main className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+            {inv?.mac_permissions && (!inv.mac_permissions.screen_recording || !inv.mac_permissions.accessibility) && (
+              <MacPermissionPanel permissions={inv.mac_permissions} onRefresh={refreshPermissions} />
+            )}
             {page === "overview" && (
               <OverviewPage
                 inventory={inv ?? emptyInventory}
                 profile={profile}
                 caps={caps}
                 preview={preview}
+                busy={busy !== null}
                 backend={inv?.backend ?? null}
                 onNavigate={(p) => setPage(p)}
                 onToggleWindow={(w) => {
                   const rule = findRuleForWindow(profile, w);
-                  const mode = rule?.mode ?? (caps?.modes.exclusion.level !== "unsupported" ? "exclusion" : "surface");
+                  const mode = rule?.mode ?? defaultMode;
                   void setProtection(w, !rule, mode);
                 }}
               />
@@ -378,7 +424,7 @@ export default function App() {
                 onRefresh={() => void refresh()}
                 onToggle={(w) => {
                   const rule = findRuleForWindow(profile, w);
-                  const mode = rule?.mode ?? (caps?.modes.exclusion.level !== "unsupported" ? "exclusion" : "surface");
+                  const mode = rule?.mode ?? defaultMode;
                   void setProtection(w, !rule, mode);
                 }}
                 onMode={(w, mode) => void setProtection(w, true, mode)}
@@ -387,8 +433,9 @@ export default function App() {
             {page === "surface" && (
               <SurfacePage
                 preview={preview}
-                busy={busy !== null}
-                onRender={() => void refresh("preview")}
+                error={previewError}
+                busy={busy !== null || rendering}
+                onRender={() => void renderPreview()}
                 onOpen={() => { void api.openSurface().catch((e) => notify(String(e), "error")); }}
               />
             )}
@@ -402,21 +449,23 @@ export default function App() {
                 onAutoArm={(v) => void setAutoArm(v)}
                 onToggleRule={async (id, enabled) => {
                   setBusy("rules");
+                  invalidatePreview();
                   try {
                     await api.setRuleEnabled(id, enabled);
-                    await api.tick();
+                    const report = await api.tick();
                     await refresh("rules", true);
-                    setError(null);
+                    reportProtection(report, "Rule updated");
                   } catch (err) { setError(String(err)); notify(String(err), "error"); }
                   finally { setBusy(null); }
                 }}
                 onRemoveRule={async (id) => {
                   setBusy("rules");
+                  invalidatePreview();
                   try {
                     await api.removeRule(id);
-                    await api.tick();
+                    const report = await api.tick();
                     await refresh("rules", true);
-                    setError(null);
+                    reportProtection(report, "Rule removed");
                   } catch (err) { setError(String(err)); notify(String(err), "error"); }
                   finally { setBusy(null); }
                 }}

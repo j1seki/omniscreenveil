@@ -58,6 +58,7 @@ export function OverviewPage({
   profile,
   caps,
   preview,
+  busy,
   backend,
   onNavigate,
   onToggleWindow,
@@ -66,12 +67,14 @@ export function OverviewPage({
   profile: Profile | null;
   caps: Capabilities | null;
   preview: SurfacePreview | null;
+  busy: boolean;
   backend: BackendInfo | null;
   onNavigate: (page: "windows" | "surface" | "audit" | "capabilities") => void;
   onToggleWindow: (window: WindowInfo) => void;
 }) {
   const windows = inventory.windows;
-  const protectedCount = windows.filter((w) => findRuleForWindow(profile, w)).length;
+  const protectedCount = inventory.applied.filter((record) => record.status.status === "applied").length;
+  const failures = inventory.applied.filter((record) => record.status.status === "failed").length;
   const captureCount = windows.filter(isCaptureWindow).length;
   const armed = Boolean(inventory.armed) || inventory.applied.length > 0;
   const topWindows = windows.slice(0, 5);
@@ -96,12 +99,12 @@ export function OverviewPage({
             </div>
             <h2 className="mt-2 text-[20px] font-semibold tracking-tight text-text text-balance">
               {armed
-                ? `${protectedCount} window${protectedCount === 1 ? "" : "s"} veiled for your audience`
+                ? `${protectedCount} active rule match${protectedCount === 1 ? "" : "es"}${failures ? ` · ${failures} failed` : ""}`
                 : "Your desktop is currently unshielded"}
             </h2>
             <p className="mt-1 max-w-[520px] text-[12px] leading-relaxed text-muted">
               {armed
-                ? "Protected windows stay usable on your screen while the shareable Surface shows a masked copy."
+                ? "Surface rules only affect the dedicated Veil Surface window. Test your actual share before showing sensitive content."
                 : "Select the windows you want to protect, then arm the shield. Everything runs locally."}
             </p>
           </div>
@@ -123,9 +126,9 @@ export function OverviewPage({
         />
         <StatCard
           icon={ShieldCheck}
-          label="Protected"
+          label="Active matches"
           value={protectedCount}
-          hint="windows with an active rule"
+          hint="applied rules, not capture verification"
           tone="success"
         />
         <StatCard
@@ -138,7 +141,7 @@ export function OverviewPage({
         <StatCard
           icon={Layers3}
           label="Best mode"
-          value={caps?.modes.exclusion.level !== "unsupported" ? "Exclusion" : "Surface"}
+          value={!caps ? "—" : caps.modes.exclusion.level !== "unsupported" ? "Exclusion" : "Surface"}
           hint={backend?.live ? `${backend.name} driver` : "preview mode"}
           tone="accent"
         />
@@ -178,6 +181,7 @@ export function OverviewPage({
                 <button
                   key={win.id}
                   type="button"
+                  disabled={busy}
                   onClick={() => onToggleWindow(win)}
                   className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-hover/60"
                 >
@@ -189,7 +193,7 @@ export function OverviewPage({
                   {isCaptureWindow(win) && <Radio className="size-3.5 shrink-0 text-warning" />}
                   {rule ? (
                     <span className="shrink-0 rounded border border-success/25 bg-success-soft px-1.5 py-0.5 text-[10px] text-success">
-                      {modeLabel(applied?.mode ?? rule.mode)}
+                      {applied?.status.status === "failed" ? "Failed" : applied ? modeLabel(applied.mode) : "Configured"}
                     </span>
                   ) : (
                     <span className="shrink-0 text-[10px] text-faint">Exposed</span>

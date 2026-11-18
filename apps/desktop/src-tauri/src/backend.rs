@@ -142,20 +142,13 @@ impl DesktopBackend {
         {
             match MacBackend::new() {
                 Ok(backend) => {
-                    let note = if backend.accessibility_trusted() {
-                        "Live macOS session. Surface captures via ScreenCaptureKit; strict hide uses Accessibility."
-                            .to_string()
-                    } else {
-                        "Live macOS session, but Accessibility permission is not granted. Strict hide will fail until you allow it in System Settings → Privacy & Security → Accessibility."
-                            .to_string()
-                    };
                     return (
                         Self::Mac(backend),
                         BackendInfo {
                             platform: Platform::MacOs,
                             name: "macOS".into(),
                             live: true,
-                            note,
+                            note: "Live macOS session. Surface uses Screen Recording; strict hide uses Accessibility.".into(),
                         },
                     );
                 }
@@ -218,8 +211,6 @@ impl DesktopBackend {
             Self::Wayland(backend) => backend.capture_root().ok(),
             #[cfg(windows)]
             Self::Windows(backend) => backend.capture_root().ok(),
-            #[cfg(target_os = "macos")]
-            Self::Mac(backend) => backend.capture_root().ok(),
             _ => None,
         }
     }

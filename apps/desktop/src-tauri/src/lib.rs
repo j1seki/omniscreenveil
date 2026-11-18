@@ -22,7 +22,7 @@ use veil_core::recovery::{
     intended_snapshot, matches_live, snapshot as recovery_snapshot, RecoveryJournal, RecoveryRecord,
 };
 use veil_core::state::AppliedProtection;
-use veil_core::{plan, AutoArm, ConfigStore, FillStyle, Profile, Size};
+use veil_core::{plan, AutoArm, ConfigStore, FillStyle, Profile, Size, WindowInfo};
 use veil_protect::{Engine, ProtectionBackend, TickReport};
 use veil_verify::{SyntheticCapture, SyntheticDesktop, VerificationHarness, VerificationRun};
 
@@ -116,6 +116,55 @@ pub struct Inventory {
     applied: Vec<AppliedProtection>,
     armed: bool,
     capture_active: bool,
+    mac_permissions: Option<MacPermissions>,
+}
+
+#[derive(Debug, Serialize)]
+struct MacPermissions {
+    screen_recording: bool,
+    accessibility: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MacPermission {
+    ScreenRecording,
+    Accessibility,
+}
+
+#[tauri::command]
+fn mac_permission(permission: MacPermission, settings: bool) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use veil_protect_macos::MacBackend;
+
+        if settings {
+            let pane = match permission {
+                MacPermission::ScreenRecording => "Privacy_ScreenCapture",
+                MacPermission::Accessibility => "Privacy_Accessibility",
+            };
+            let status = std::process::Command::new("/usr/bin/open")
+                .arg(format!(
+                    "x-apple.systempreferences:com.apple.preference.security?{pane}"
+                ))
+                .status()
+                .map_err(|err| format!("Could not open System Settings: {err}"))?;
+            if !status.success() {
+                return Err("Could not open System Settings.".into());
+            }
+        } else {
+            match permission {
+                MacPermission::ScreenRecording => MacBackend::request_screen_recording(),
+                MacPermission::Accessibility => MacBackend::request_accessibility(),
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (permission, settings);
+        Err("These permissions are only available on macOS.".into())
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -174,6 +223,14 @@ fn inventory(state: State<'_, Mutex<AppState>>) -> Result<Inventory, String> {
         applied: state.engine.applied(),
         armed,
         capture_active,
+        mac_permissions: match &state.engine.backend {
+            #[cfg(target_os = "macos")]
+            DesktopBackend::Mac(backend) => Some(MacPermissions {
+                screen_recording: veil_protect_macos::MacBackend::screen_recording_granted(),
+                accessibility: backend.accessibility_trusted(),
+            }),
+            _ => None,
+        },
     })
 }
 
@@ -208,7 +265,10 @@ fn add_window_rule(
 
 /// Protect every app that currently owns a protectable window.
 #[tauri::command]
-fn protect_all(state: State<'_, Mutex<AppState>>, mode: ProtectionMode) -> Result<Profile, String> {
+fn protect_all(
+    state: State<'_, Mutex<AppState>>,
+    mode: ProtectionMode,
+) -> Result<TickReport, String> {
     let mut state = lock(&state)?;
     let own_pid = std::process::id();
     let windows: Vec<_> = state
@@ -243,11 +303,11 @@ fn protect_all(state: State<'_, Mutex<AppState>>, mode: ProtectionMode) -> Resul
         .recovery
         .save(&records)
         .map_err(|err| err.to_string())?;
-    state.engine.tick(&windows);
+    let report = state.engine.tick(&windows);
     state.journal();
     state.engine.drain_events();
     state.save()?;
-    Ok(state.engine.profile.clone())
+    Ok(report)
 }
 
 #[tauri::command]
@@ -455,15 +515,18 @@ fn release_all(state: State<'_, Mutex<AppState>>) -> Result<ReleaseReport, Strin
 ///
 /// Uses a real X11 capture when one is available, otherwise a synthetic
 /// desktop, and always labels which one in `source`.
+// Capture can take seconds on macOS; never run it on the webview event loop.
 #[tauri::command]
-fn preview(state: State<'_, Mutex<AppState>>) -> Result<SurfacePreview, String> {
-    let state = lock(&state)?;
-    let windows = state.engine.backend.list_windows()?;
-    // Mask only what the engine has actually applied. Deriving this from the
-    // profile would keep painting the veil after "Release all", so the preview
-    // would disagree with the applied set and with strict hide.
-    let surface: BTreeSet<WindowId> = state
-        .engine
+async fn preview(state: State<'_, Mutex<AppState>>) -> Result<SurfacePreview, String> {
+    render_preview(state.inner())
+}
+
+fn surface_targets<B: ProtectionBackend>(
+    engine: &Engine<B>,
+    armed: bool,
+    windows: &[WindowInfo],
+) -> BTreeSet<WindowId> {
+    let mut surface: BTreeSet<WindowId> = engine
         .applied()
         .into_iter()
         .filter(|protection| {
@@ -472,7 +535,89 @@ fn preview(state: State<'_, Mutex<AppState>>) -> Result<SurfacePreview, String> 
         .map(|protection| protection.window)
         .collect();
 
-    // X11 and macOS exclude our windows inside the capture; Wayland's
+    // The monitor is periodic. Don't expose newly opened windows that match
+    // armed Surface rules while waiting for the next reconciliation pass.
+    if engine.should_arm(windows, armed) {
+        surface.extend(
+            engine
+                .plan(windows)
+                .apply
+                .into_iter()
+                .filter(|intent| intent.mode == ProtectionMode::Surface)
+                .map(|intent| intent.window),
+        );
+    }
+    surface
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+    use veil_core::{Platform, Rect};
+    use veil_protect::MemoryBackend;
+
+    #[test]
+    fn surface_covers_new_matches_before_monitor_ticks_but_not_when_disarmed() {
+        let app = AppKey::MacBundle("example.demo".into());
+        let mut profile = Profile::new();
+        profile.add_app_rule(app.clone(), ProtectionMode::Exclusion);
+        let engine = Engine::new(profile, MemoryBackend::new(Platform::MacOs));
+        let windows = [WindowInfo {
+            id: WindowId(42),
+            app,
+            app_name: "Demo".into(),
+            title: "New window".into(),
+            pid: 123,
+            bounds: Rect::new(0, 0, 320, 240),
+            monitor: None,
+            visible: true,
+            minimized: false,
+            top_level: true,
+            platform: Platform::MacOs,
+            icon: String::new(),
+        }];
+        assert!(engine.applied().is_empty());
+        assert_eq!(
+            surface_targets(&engine, true, &windows),
+            BTreeSet::from([WindowId(42)])
+        );
+        assert!(surface_targets(&engine, false, &windows).is_empty());
+    }
+}
+
+fn render_preview(state: &Mutex<AppState>) -> Result<SurfacePreview, String> {
+    let state = state.lock().map_err(|err| err.to_string())?;
+    #[cfg(target_os = "macos")]
+    if matches!(&state.engine.backend, DesktopBackend::Mac(_))
+        && !veil_protect_macos::MacBackend::screen_recording_granted()
+    {
+        return Err("Allow Screen Recording in OmniScreenVeil's main window to use the Veil Surface. macOS may require quitting and reopening the app.".into());
+    }
+    let windows = state.engine.backend.list_windows()?;
+    let surface = surface_targets(&state.engine, state.armed, &windows);
+
+    #[cfg(target_os = "macos")]
+    if let DesktopBackend::Mac(backend) = &state.engine.backend {
+        let frame = backend
+            .capture_filtered(&surface)
+            .map_err(|err| err.to_string())?;
+        // A new window can appear while ScreenCaptureKit is preparing the
+        // frame. If the new inventory requires a different filter, drop it.
+        let latest = backend.list_windows().map_err(|err| err.to_string())?;
+        if !surface_targets(&state.engine, state.armed, &latest).is_subset(&surface) {
+            return Err(
+                "Protected windows changed during capture; retrying with a new filter.".into(),
+            );
+        }
+        let count = windows
+            .iter()
+            .filter(|w| w.visible && surface.contains(&w.id))
+            .count();
+        drop(state);
+        return surface_preview(&frame, count, "ScreenCaptureKit · filtered main display");
+    }
+
+    // Composited X11 excludes our windows inside the capture; Wayland's
     // screencopy sees the whole output, so its own windows are veiled out.
     let own_windows = if state.engine.backend.capture_includes_own_windows() {
         state.engine.backend.own_windows()
@@ -491,6 +636,7 @@ fn preview(state: State<'_, Mutex<AppState>>) -> Result<SurfacePreview, String> 
         None if !state.info.live => (synthetic_desktop(&windows), "simulated desktop"),
         None => return Err("Live desktop capture failed. The Surface is unavailable; check capture permissions and platform support.".into()),
     };
+    drop(state);
 
     let mut plan = veil_surface::SurfacePlan::new(source_frame.size(), FillStyle::veiled());
     let mut masked = 0usize;
@@ -507,13 +653,21 @@ fn preview(state: State<'_, Mutex<AppState>>) -> Result<SurfacePreview, String> 
         plan = plan.exclude(own);
     }
     let rendered = veil_surface::render(&source_frame, &plan);
-    let png = encode_png(&rendered)?;
+    surface_preview(&rendered, masked, source_label)
+}
+
+fn surface_preview(
+    frame: &veil_surface::Frame,
+    masked: usize,
+    source: &str,
+) -> Result<SurfacePreview, String> {
+    let png = encode_png(frame)?;
     Ok(SurfacePreview {
         png_base64: base64::engine::general_purpose::STANDARD.encode(png),
-        width: rendered.width,
-        height: rendered.height,
+        width: frame.width,
+        height: frame.height,
         masked,
-        source: source_label.to_string(),
+        source: source.to_string(),
     })
 }
 
@@ -698,7 +852,7 @@ fn toggle_now(app: &tauri::AppHandle) {
             state
                 .lock()
                 .ok()
-                .map(|guard| !guard.engine.applied().is_empty())
+                .map(|guard| guard.armed || !guard.engine.applied().is_empty())
         })
         .unwrap_or(false);
     if armed {
@@ -980,6 +1134,7 @@ pub fn run() {
             capabilities,
             capability_matrix,
             inventory,
+            mac_permission,
             get_profile,
             add_app_rule,
             add_window_rule,
@@ -1144,7 +1299,14 @@ pub fn run() {
                         }
                     }
                     "arm" => toggle_now(app),
-                    "release" => release_all_now(app),
+                    "release" => {
+                        if let Some(state) = app.try_state::<Mutex<AppState>>() {
+                            if let Ok(mut guard) = state.lock() {
+                                guard.engine.profile.auto_arm = AutoArm::Off;
+                            }
+                        }
+                        release_all_now(app);
+                    }
                     "quit" => app.exit(0),
                     _ => {}
                 })

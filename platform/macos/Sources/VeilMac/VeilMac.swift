@@ -4,8 +4,8 @@
 //
 //   * AppKit / ApplicationServices / ScreenCaptureKit public API only.
 //   * No private SkyLight/CGS symbols, no SIP changes, no code signing tricks.
-//   * Nothing here can *exclude a foreign window from capture*. That is the
-//     whole reason `Exclusion` is reported as unsupported on macOS. What this
+//   * Filters only affect captures created by this process, never captures
+//     made by another app. System-wide `Exclusion` remains unsupported. This
 //     library provides is:
 //       - real window inventory (CGWindowList + Accessibility),
 //       - strict hide / show for a foreign window (Accessibility),
@@ -176,10 +176,10 @@ public enum VeilMac {
         var frameMatches: [AXUIElement] = []
         var titleMatches: [AXUIElement] = []
         for window in windows {
-            if let number = attribute(window, "AXWindowNumber") as? NSNumber,
-                number.uint32Value == windowID
-            {
-                return window
+            if let number = attribute(window, "AXWindowNumber") as? NSNumber {
+                if number.uint32Value == windowID { return window }
+                // A known different ID must never be accepted by a heuristic.
+                continue
             }
             guard let expected else { continue }
             let title = (attribute(window, kAXTitleAttribute) as? String) ?? ""
@@ -198,7 +198,6 @@ public enum VeilMac {
         }
         if frameMatches.count == 1 { return frameMatches[0] }
         if titleMatches.count == 1 { return titleMatches[0] }
-        if windows.count == 1 { return windows[0] }
         throw VeilMacError.windowNotFound(windowID)
     }
 
@@ -246,6 +245,7 @@ public enum VeilMac {
     /// it exactly like a Windows/X11 frame.
     public static func captureDisplay(
         displayID: CGDirectDisplayID,
+        excludingWindowIDs: Set<UInt32> = [],
         completion: @escaping (Result<(Data, Int, Int), Error>) -> Void
     ) {
         Task {
@@ -254,14 +254,25 @@ public enum VeilMac {
                     false, onScreenWindowsOnly: true
                 )
                 let wanted = displayID == 0 ? CGMainDisplayID() : displayID
-                guard let display = content.displays.first(where: { $0.displayID == wanted })
-                    ?? content.displays.first
-                else {
-                    throw VeilMacError.captureUnavailable("no displays reported by ScreenCaptureKit")
+                guard let display = content.displays.first(where: { $0.displayID == wanted }) else {
+                    throw VeilMacError.captureUnavailable("requested display is unavailable")
                 }
+                let available = Set(content.windows.map(\.windowID))
+                let missing = excludingWindowIDs.subtracting(available)
+                if !missing.isEmpty && listWindows(includeTiny: true).contains(where: {
+                    missing.contains($0.id)
+                }) {
+                    throw VeilMacError.captureUnavailable(
+                        "could not filter every protected window; withholding this frame"
+                    )
+                }
+                let ownPID = ProcessInfo.processInfo.processIdentifier
                 let filter = SCContentFilter(
                     display: display,
-                    excludingWindows: ownWindows(in: content)
+                    excludingWindows: content.windows.filter {
+                        $0.owningApplication?.processID == ownPID
+                            || excludingWindowIDs.contains($0.windowID)
+                    }
                 )
                 let config = SCStreamConfiguration()
                 config.width = display.width
@@ -312,9 +323,4 @@ public enum VeilMac {
         }
         return (data, width, height)
     }
-}
-
-/// Windows owned by this process, for `SCContentFilter(display:excludingWindows:)`.
-private func ownWindows(in content: SCShareableContent) -> [SCWindow] {
-    content.windows.filter { $0.owningApplication?.processID == ProcessInfo.processInfo.processIdentifier }
 }

@@ -15,9 +15,9 @@ real machine instead of being claimed from a Linux VM.
 
 ## What it deliberately does **not** do
 
-There is no `exclude window from ScreenCaptureKit` call, because macOS has no
-public API for a third-party process to do that. `Exclusion` stays
-`unsupported` in the capability matrix; the Veil Surface is the macOS answer.
+macOS has no public API to remove a window from another capture client's
+stream. `Exclusion` stays `unsupported` in the capability matrix. The Veil
+Surface filters selected window IDs out of its own ScreenCaptureKit capture.
 
 ## Build and run
 
@@ -26,7 +26,8 @@ cd platform/macos
 swift build -c release
 .build/release/veilmac-spike permission
 .build/release/veilmac-spike list
-.build/release/veilmac-spike capture 1      # writes veilmac-capture.ppm
+.build/release/veilmac-spike capture 0      # main display; writes veilmac-capture.ppm
+# Add one or more IDs from `list` to filter them in this capture only.
 swift test
 ```
 
@@ -43,13 +44,15 @@ int32_t veil_macos_hide_window(uint64_t window);
 int32_t veil_macos_show_window(uint64_t window);
 int32_t veil_macos_accessibility_trusted(void);
 int32_t veil_macos_request_accessibility(void);
+int32_t veil_macos_screen_recording_granted(void);
+int32_t veil_macos_request_screen_recording(void);
 char   *veil_macos_last_error(void);          /* free with veil_macos_free_string */
-uint8_t *veil_macos_capture_display(uint32_t display, uint32_t *w, uint32_t *h);
+uint8_t *veil_macos_capture_display(uint32_t display, const uint32_t *excluded_ids,
+                                   size_t excluded_count, uint32_t *w, uint32_t *h);
 void    veil_macos_free_buffer(uint8_t *buffer);
 ```
 
-Build the release static library, then point `build.rs` at
-`.build/release/libVeilMac.a` (the Tauri bundling step will copy it next to the
-app). The Rust crate already declares the first four symbols behind
-`cfg(target_os = "macos")`, so a missing library is a link error rather than a
-runtime surprise.
+Build the release static library and set `VEIL_MACOS_STATIC_LIB` to its absolute
+path if you aren't using the default `.build/release/libVeilMac.a` location.
+The library links into the macOS binary; it is not a separate bundled helper.
+For distributing the desktop app, see the [macOS release signing instructions](../../README.md#macos-release-signing).

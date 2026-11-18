@@ -69,21 +69,35 @@ public func veilMacosRequestAccessibility() -> Int32 {
     VeilMac.requestAccessibility() ? 1 : 0
 }
 
+@_cdecl("veil_macos_screen_recording_granted")
+public func veilMacosScreenRecordingGranted() -> Int32 {
+    CGPreflightScreenCaptureAccess() ? 1 : 0
+}
+
+@_cdecl("veil_macos_request_screen_recording")
+public func veilMacosRequestScreenRecording() -> Int32 {
+    CGRequestScreenCaptureAccess() ? 1 : 0
+}
+
 /// Capture the display synchronously for the Rust verifier.
 ///
-/// On success returns a malloc'd BGRA buffer (caller frees with
+/// On success returns an allocated BGRA buffer (caller frees with
 /// `veil_macos_free_buffer`) and writes dimensions to `outWidth`/`outHeight`.
 /// On failure returns NULL.
 @_cdecl("veil_macos_capture_display")
 public func veilMacosCaptureDisplay(
     _ displayID: UInt32,
+    _ excludedIDs: UnsafePointer<UInt32>?,
+    _ excludedCount: Int,
     _ outWidth: UnsafeMutablePointer<UInt32>?,
     _ outHeight: UnsafeMutablePointer<UInt32>?
 ) -> UnsafeMutablePointer<UInt8>? {
     clearLastError()
+    // Copy before starting asynchronous work; the Rust slice is borrowed.
+    let excluded = Set(UnsafeBufferPointer(start: excludedIDs, count: excludedCount))
     let semaphore = DispatchSemaphore(value: 0)
     var result: Result<(Data, Int, Int), Error>?
-    VeilMac.captureDisplay(displayID: CGDirectDisplayID(displayID)) { outcome in
+    VeilMac.captureDisplay(displayID: CGDirectDisplayID(displayID), excludingWindowIDs: excluded) { outcome in
         result = outcome
         semaphore.signal()
     }

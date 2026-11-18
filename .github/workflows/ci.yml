@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master, main]
+    branches: [master, main, 'test-build/**']
   pull_request:
   workflow_dispatch:
 
@@ -122,3 +122,21 @@ jobs:
         run: cargo check
         env:
           VEIL_MACOS_STATIC_LIB: ${{ github.workspace }}/platform/macos/.build/release/libVeilMac.a
+      - name: Build ad-hoc signed macOS test app (not a release)
+        if: runner.os == 'macOS' && (startsWith(github.ref, 'refs/heads/test-build/') || github.event_name == 'workflow_dispatch')
+        working-directory: apps/desktop
+        env:
+          VEIL_MACOS_STATIC_LIB: ${{ github.workspace }}/platform/macos/.build/release/libVeilMac.a
+        run: |
+          pnpm tauri build --bundles app --config '{"bundle":{"createUpdaterArtifacts":false,"macOS":{"signingIdentity":"-"}}}'
+          app=src-tauri/target/release/bundle/macos/OmniScreenVeil.app
+          codesign --verify --deep --strict "$app"
+          file "$app/Contents/MacOS/omniscreenveil-desktop"
+          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/OmniScreenVeil-macOS-test.zip"
+      - name: Upload macOS test app
+        if: runner.os == 'macOS' && (startsWith(github.ref, 'refs/heads/test-build/') || github.event_name == 'workflow_dispatch')
+        uses: actions/upload-artifact@v4
+        with:
+          name: OmniScreenVeil-macOS-test
+          path: ${{ runner.temp }}/OmniScreenVeil-macOS-test.zip
+          if-no-files-found: error

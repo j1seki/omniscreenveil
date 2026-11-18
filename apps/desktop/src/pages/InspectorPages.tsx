@@ -26,11 +26,13 @@ import { Switch } from "../components/ui/switch";
 /* ------------------------------ Surface ---------------------------------- */
 export function SurfacePage({
   preview,
+  error,
   busy,
   onRender,
   onOpen,
 }: {
   preview: SurfacePreview | null;
+  error: string | null;
   busy: boolean;
   onRender: () => void;
   onOpen: () => void;
@@ -42,14 +44,14 @@ export function SurfacePage({
           <h2 className="text-[14px] font-semibold text-text">Live compositor preview</h2>
           <p className="mt-0.5 text-[12px] text-muted">
             {preview
-              ? `${preview.width}×${preview.height} · ${preview.masked} masked region${preview.masked === 1 ? "" : "s"} · ${preview.source}`
-              : "Waiting for the first frame…"}
+              ? `${preview.width}×${preview.height} · ${preview.masked} windows or regions covered · ${preview.source}`
+              : "Render a frame to check what the audience will see."}
           </p>
         </div>
         <div className="flex gap-2">
           <Button variant="secondary" size="sm" onClick={onRender} disabled={busy} className="h-8 text-[12px]">
             <RefreshCw className={cn("size-3.5", busy && "animate-spin")} />
-            Re-render
+            {preview ? "Re-render" : "Render preview"}
           </Button>
           <Button size="sm" onClick={onOpen} disabled={busy} className="h-8 text-[12px]">
             <ExternalLink className="size-3.5" />
@@ -57,6 +59,8 @@ export function SurfacePage({
           </Button>
         </div>
       </div>
+
+      {error && <p role="alert" className="rounded-lg border border-danger/30 bg-panel p-3 text-sm text-danger">{error}</p>}
 
       <div className="overflow-hidden rounded-xl border border-border bg-panel">
         <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
@@ -72,7 +76,7 @@ export function SurfacePage({
           {preview?.png_base64 ? (
             <img
               src={`data:image/png;base64,${preview.png_base64}`}
-              alt="Veil Surface preview with protected windows masked"
+              alt="Veil Surface preview"
               className="size-full object-contain"
             />
           ) : (
@@ -84,7 +88,7 @@ export function SurfacePage({
             ┌ VEIL_SURFACE // PREVIEW ONLY
           </div>
           <div className="pointer-events-none absolute right-3 bottom-3 rounded border border-border bg-app/85 px-2 py-1 font-mono text-[10px] text-accent backdrop-blur">
-            SHARE_SAFE ┘
+            {preview ? "SNAPSHOT" : "NO FRAME"} ┘
           </div>
         </div>
       </div>
@@ -97,11 +101,11 @@ export function SurfacePage({
           },
           {
             title: "Stay in control locally",
-            text: "Your protected windows remain visible and interactive on your own screen. Only the composited, masked frame is shown to your audience.",
+            text: "Surface rules leave windows usable locally. macOS filters them from this app’s main-display capture; other backends mask them. Other apps’ desktop captures are unchanged.",
           },
           {
             title: "Test before you share",
-            text: "The preview and audit use synthetic checks. Verify masking in your actual sharing application before exposing sensitive content.",
+            text: "The audit is synthetic. Check the preview source and verify the dedicated Surface in your actual sharing application before exposing sensitive content.",
           },
         ].map((item, i) => (
           <div key={item.title} className="rounded-lg border border-border bg-panel p-3.5">

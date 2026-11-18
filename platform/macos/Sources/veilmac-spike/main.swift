@@ -23,7 +23,7 @@ func usage() -> Never {
       list                    list protectable windows
       hide <window-id>        strict-hide a window (Accessibility)
       show <window-id>        restore a hidden window
-      capture <display-id>    capture a display to a PPM file
+      capture <display-id> [window-id ...]   capture a display, optionally filtering windows
       permission              report and request Accessibility consent
       selftest                run local invariant checks
     """
@@ -139,9 +139,14 @@ case "show":
         fail(error.localizedDescription)
     }
 case "capture":
-    guard args.count == 3, let display = UInt32(args[2]) else { usage() }
+    guard args.count >= 3, let display = UInt32(args[2]) else { usage() }
+    var excluded = Set<UInt32>()
+    for value in args.dropFirst(3) {
+        guard let id = UInt32(value) else { usage() }
+        excluded.insert(id)
+    }
     let semaphore = DispatchSemaphore(value: 0)
-    VeilMac.captureDisplay(displayID: CGDirectDisplayID(display)) { result in
+    VeilMac.captureDisplay(displayID: CGDirectDisplayID(display), excludingWindowIDs: excluded) { result in
         switch result {
         case .success(let (data, width, height)):
             writePPM(path: "veilmac-capture.ppm", data: data, width: width, height: height)
@@ -150,7 +155,7 @@ case "capture":
         }
         semaphore.signal()
     }
-    semaphore.wait()
+    if semaphore.wait(timeout: .now() + 15) == .timedOut { fail("capture timed out") }
 case "permission":
     let already = VeilMac.isAccessibilityTrusted()
     let granted = VeilMac.requestAccessibility()

@@ -111,12 +111,16 @@ export interface BackendInfo {
   note: string;
 }
 
+export type MacPermission = "screen_recording" | "accessibility";
+export type MacPermissions = Record<MacPermission, boolean>;
+
 export interface Inventory {
   windows: WindowInfo[];
   backend: BackendInfo;
   applied: AppliedProtection[];
   armed?: boolean;
   capture_active?: boolean;
+  mac_permissions?: MacPermissions | null;
 }
 
 export interface TickReport {

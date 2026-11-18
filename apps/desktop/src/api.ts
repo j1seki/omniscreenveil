@@ -15,6 +15,7 @@ import type {
   Capabilities,
   InstallOutcome,
   Inventory,
+  MacPermission,
   Platform,
   Profile,
   ProtectionMode,
@@ -321,6 +322,10 @@ export async function inventory(): Promise<Inventory> {
   return invoke<Inventory>("inventory");
 }
 
+export function macPermission(permission: MacPermission, settings = false): Promise<void> {
+  return invoke("mac_permission", { permission, settings });
+}
+
 export async function getProfile(): Promise<Profile> {
   if (!IN_TAURI) return structuredClone(mockProfile);
   return invoke<Profile>("get_profile");
@@ -362,7 +367,7 @@ export async function addWindowRule(
   return invoke<Profile>("add_window_rule", { window, mode });
 }
 
-export async function protectAll(mode: ProtectionMode): Promise<Profile> {
+export async function protectAll(mode: ProtectionMode): Promise<TickReport> {
   if (!IN_TAURI) {
     mockExplicitArmed = true;
     for (const window of mockWindows()) {
@@ -379,9 +384,9 @@ export async function protectAll(mode: ProtectionMode): Promise<Profile> {
         });
       }
     }
-    return structuredClone(mockProfile);
+    return mockTick();
   }
-  return invoke<Profile>("protect_all", { mode });
+  return invoke<TickReport>("protect_all", { mode });
 }
 
 export async function removeAppRules(app: AppKey): Promise<Profile> {
