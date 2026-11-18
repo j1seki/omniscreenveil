@@ -40,9 +40,14 @@ willingly captures the window outside OmniScreenVeil.
 - The audience shares the Surface window, not the whole desktop. If they share
   the entire desktop, the original windows are visible; the product cannot stop
   that and the UI says so.
-- The Surface compositor sees the desktop through the same capture path the
-  audience would. Protected rectangles are replaced after capture, before the
-  frame is presented.
+- The Surface captures the desktop itself; the audience captures only the
+  rendered Surface. On macOS, selected windows are filtered out of the main
+  display capture by ScreenCaptureKit. Other backends replace protected
+  rectangles after capture, before the frame is presented.
+- Protection is for inventoried windows, not arbitrary application pixels.
+  Menus, transient overlays, or other content rendered outside those windows
+  may still appear. Inventory and capture are separate operations; test with
+  harmless content in your sharing app before showing sensitive material.
 - The Surface must never capture itself. On X11 with a compositor and on macOS
   (ScreenCaptureKit `SCContentFilter`), the app's own control and Surface
   windows are excluded before compositing; on bare X11 and on Wayland
