@@ -182,6 +182,11 @@ impl DesktopBackend {
     }
 
     pub fn list_windows(&self) -> Result<Vec<WindowInfo>, String> {
+        self.inventory(false)
+    }
+
+    pub fn inventory(&self, icons: bool) -> Result<Vec<WindowInfo>, String> {
+        let _ = icons;
         match self {
             #[cfg(target_os = "linux")]
             Self::X11(backend) => backend
@@ -193,23 +198,24 @@ impl DesktopBackend {
                 .map_err(|err| format!("Wayland inventory failed: {err}")),
             #[cfg(windows)]
             Self::Windows(backend) => backend
-                .list_windows()
+                .inventory(icons)
                 .map_err(|err| format!("Windows inventory failed: {err}")),
             #[cfg(target_os = "macos")]
             Self::Mac(backend) => backend
-                .list_windows()
+                .inventory(icons)
                 .map_err(|err| format!("macOS inventory failed: {err}")),
             Self::Simulated(_) => Ok(demo_windows(Platform::detect())),
         }
     }
 
     /// Capture the desktop for the Veil Surface preview, when the backend can.
-    pub fn capture_frame(&self) -> Option<Frame> {
+    pub fn capture_frame(&self, region: Option<veil_core::Rect>) -> Option<Frame> {
+        let _ = region;
         match self {
             #[cfg(target_os = "linux")]
             Self::X11(backend) => backend.platform().capture_surface().ok(),
             #[cfg(target_os = "linux")]
-            Self::Wayland(backend) => backend.capture_root().ok(),
+            Self::Wayland(backend) => backend.capture_region(region).ok(),
             #[cfg(windows)]
             Self::Windows(backend) => backend.capture_root().ok(),
             _ => None,

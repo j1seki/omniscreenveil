@@ -1,52 +1,106 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
+import { RefreshCw, X } from "lucide-react";
 import * as api from "./api";
+import { DisplayPicker } from "./components/DisplayPicker";
+import type { DesktopPreferences, Display } from "./types";
 
-/// Clean, chrome-free window that an audience can be shown.
-///
-/// It is deliberately not the main window: no controls, no window list, no
-/// capability copy. It only polls the compositor and paints the latest frame.
-/// The Surface window itself is masked out of that frame by the backend, so it
-/// cannot recurse into its own output.
 export default function Surface() {
   const [src, setSrc] = useState<string | null>(null);
-  const [unavailable, setUnavailable] = useState(false);
+  const [message, setMessage] = useState("Waiting for the first frame…");
+  const [displays, setDisplays] = useState<Display[]>([]);
+  const [monitor, setMonitor] = useState<string | null>(null);
+  const [mode, setMode] = useState<DesktopPreferences["preview_mode"] | null>(null);
+  const [revision, refresh] = useState(0);
+  const inFlight = useRef<Promise<unknown> | null>(null);
 
   useEffect(() => {
-    let alive = true;
-    let timer: number | undefined;
-
-    const poll = async () => {
-      try {
-        const frame = await api.preview();
-        if (!alive) return;
-        setSrc(`data:image/png;base64,${frame.png_base64}`);
-        setUnavailable(false);
-      } catch {
-        if (alive) {
-          setSrc(null);
-          setUnavailable(true);
-        }
-      } finally {
-        if (alive) timer = window.setTimeout(poll, 1500);
-      }
+    let active = true;
+    const cleanups: (() => void)[] = [];
+    const updateDisplays = () => void api.surfaceDisplays().then((list) => { if (active) setDisplays(list); }, () => {});
+    const change = () => { setSrc(null); refresh((r) => r + 1); };
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") void api.closeSurface().catch((err) => setMessage(String(err)));
     };
-
-    void poll();
+    window.addEventListener("keydown", close);
+    window.addEventListener("focus", updateDisplays);
+    if (api.IN_TAURI) {
+      void listen("veil://changed", change).then((stop) => active ? cleanups.push(stop) : stop()).catch(() => {});
+      void listen<DesktopPreferences>("veil://preferences", (event) => {
+        setMode(event.payload.preview_mode);
+        change();
+      }).then((stop) => active ? cleanups.push(stop) : stop()).catch(() => {});
+    }
+    updateDisplays();
+    void api.getPreferences().then((prefs) => { if (active) setMode(prefs.preview_mode); }, () => { if (active) setMode("economy"); });
     return () => {
-      alive = false;
-      if (timer !== undefined) window.clearTimeout(timer);
+      active = false;
+      window.removeEventListener("keydown", close);
+      window.removeEventListener("focus", updateDisplays);
+      cleanups.forEach((stop) => stop());
     };
   }, []);
 
-  return (
-    <div className="surface">
-      {unavailable ? (
-        <div className="surface-status" role="status">Frame unavailable · retrying…</div>
-      ) : src ? (
-        <img src={src} alt="Veil Surface capture" />
-      ) : (
-        <div className="surface-status">Waiting for the first frame…</div>
-      )}
+  useEffect(() => {
+    if (!mode) return;
+    let active = true;
+    let epoch = 0;
+    let minimized = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      const began = performance.now();
+      const version = epoch;
+      try {
+        if (document.hidden || (api.IN_TAURI && await getCurrentWindow().isMinimized())) {
+          minimized = true;
+          if (active) { setSrc(null); setMessage("Capture paused while minimized"); }
+          return;
+        }
+        minimized = false;
+        if (inFlight.current) await inFlight.current.catch(() => {});
+        if (!active || epoch !== version || document.hidden) return;
+        const request = api.preview(monitor, mode === "motion");
+        inFlight.current = request;
+        try {
+          const frame = await request;
+          if (active && epoch === version && !document.hidden) setSrc(`data:image/png;base64,${frame.png_base64}`);
+        } finally {
+          if (inFlight.current === request) inFlight.current = null;
+        }
+      } catch (err) {
+        if (active && epoch === version) { setSrc(null); setMessage(String(err)); }
+      } finally {
+        if (active && epoch === version && !document.hidden && mode !== "manual") {
+          const period = mode === "motion" ? 200 : 1500;
+          timer = window.setTimeout(poll, Math.max(40, period - (performance.now() - began)));
+        }
+      }
+    };
+    const visibility = () => {
+      epoch++;
+      window.clearTimeout(timer);
+      setSrc(null);
+      if (!document.hidden) void poll();
+    };
+    const focus = () => { if (minimized && !document.hidden) visibility(); };
+    document.addEventListener("visibilitychange", visibility);
+    window.addEventListener("focus", focus);
+    void poll();
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", visibility);
+      window.removeEventListener("focus", focus);
+    };
+  }, [mode, monitor, revision]);
+
+  return <div className="surface">
+    {src ? <img src={src} alt="Veil Surface capture" /> : <div className="surface-status px-8 text-center" role="status">{message}</div>}
+    <div className="absolute top-0 right-0 left-0 flex items-center justify-end gap-3 bg-black/85 px-3 py-2 text-white opacity-0 transition-opacity hover:opacity-100 focus-within:opacity-100">
+      <DisplayPicker displays={displays} value={monitor} onChange={(value) => { setSrc(null); setMessage("Switching displays…"); setMonitor(value); }} />
+      <button type="button" title="Refresh the Surface frame" aria-label="Refresh the Surface frame" onClick={() => refresh((r) => r + 1)}><RefreshCw size={16} /></button>
+      <button type="button" title="Close Surface (Esc)" aria-label="Close Surface" onClick={() => void api.closeSurface().catch((err) => setMessage(String(err)))}><X size={18} /></button>
     </div>
-  );
+  </div>;
 }

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { Inventory, Profile, VerificationRun, WindowInfo } from "../types";
+import type { Inventory, Profile, WindowInfo } from "../types";
 import { findRuleForWindow, isCaptureWindow, modeLabel } from "../types";
 import { cn } from "../lib/utils";
 
@@ -158,98 +158,6 @@ export function SpatialRadar({
           );
         })}
       </div>
-    </div>
-  );
-}
-
-/* ---------------------------------------------------------------------------
-   CanaryGrid — deterministic visualisation of the 8×8 verification token.
---------------------------------------------------------------------------- */
-const PALETTE = ["#6d72e8", "#ec4899", "#f5b942", "#3ddc97", "#58b6f5", "#a855f7", "#f4738c", "#eab308"];
-
-export function CanaryGrid({
-  verification,
-  busy,
-}: {
-  verification: VerificationRun | null;
-  busy: boolean;
-}) {
-  const [scanRow, setScanRow] = useState(0);
-  useEffect(() => {
-    const id = window.setInterval(() => setScanRow((r) => (r + 1) % 8), busy ? 90 : 360);
-    return () => window.clearInterval(id);
-  }, [busy]);
-
-  const cells = useMemo(
-    () =>
-      Array.from({ length: 64 }, (_, i) => {
-        const x = i % 8;
-        const y = Math.floor(i / 8);
-        return PALETTE[(x * 37 + y * 13 + (x ^ y) * 7) % PALETTE.length];
-      }),
-    [],
-  );
-
-  const masked = verification ? !verification.after.found : false;
-
-  return (
-    <div className="grid grid-cols-2 gap-3">
-      {(["baseline", "after"] as const).map((which) => {
-        const isAfter = which === "after";
-        const detection = isAfter ? verification?.after : verification?.baseline;
-        return (
-          <div key={which} className="rounded-lg border border-border bg-app p-3">
-            <div className="mb-2 flex items-center justify-between font-mono text-[10px]">
-              <span className="font-medium text-muted">
-                {isAfter ? "02 · POST-ARM AUDIT" : "01 · BASELINE TOKEN"}
-              </span>
-              <span className={isAfter ? (masked ? "text-success" : "text-danger") : "text-warning"}>
-                {verification ? `${detection?.matched ?? 0}/64` : "NOT RUN"}
-              </span>
-            </div>
-            <div className="grid grid-cols-8 gap-0.5 rounded border border-border bg-panel p-1.5">
-              {cells.map((color, i) => {
-                const row = Math.floor(i / 8);
-                const col = i % 8;
-                const checker = (row + col) % 2 === 0;
-                const scanning = row === scanRow;
-                return (
-                  <div
-                    key={i}
-                    style={{
-                      backgroundColor: isAfter
-                        ? masked
-                          ? checker
-                            ? "var(--color-veil-a)"
-                            : "var(--color-veil-b)"
-                          : color
-                        : color,
-                    }}
-                    className={cn(
-                      "flex aspect-square items-center justify-center rounded-[2px] font-mono text-[7px] transition-all",
-                      scanning && "ring-1 ring-accent/70",
-                      isAfter && masked && "text-accent/50",
-                    )}
-                  >
-                    {isAfter && masked ? (checker ? "░" : "▒") : ""}
-                  </div>
-                );
-              })}
-            </div>
-            <p className="mt-2 font-mono text-[9px] text-faint">
-              {!verification
-                ? "Awaiting audit"
-                : isAfter
-                  ? masked
-                    ? "✓ Synthetic token absent after veil"
-                    : "✗ Token still observable"
-                  : detection?.found
-                    ? `Token locked at ${detection.origin?.x},${detection.origin?.y}`
-                    : "Token not seen"}
-            </p>
-          </div>
-        );
-      })}
     </div>
   );
 }

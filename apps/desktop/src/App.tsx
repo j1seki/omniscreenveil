@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import {
   CircleHelp,
   Download,
@@ -22,13 +23,13 @@ import { useTheme } from "./lib/theme";
 import { useUpdater } from "./lib/updater";
 import type {
   AutoArm,
+  AppKey,
   Capabilities,
   Inventory,
   Profile,
   ProtectionMode,
   SurfacePreview,
   TickReport,
-  VerificationRun,
   WindowInfo,
 } from "./types";
 import { findRuleForWindow } from "./types";
@@ -44,6 +45,7 @@ import { AuditPage, CapabilitiesPage, RulesPage, SurfacePage } from "./pages/Ins
 import { OverviewPage } from "./pages/OverviewPage";
 import { UpdatesPage } from "./pages/UpdatesPage";
 import { WindowsPage } from "./pages/WindowsPage";
+import { SettingsPage } from "./pages/SettingsPage";
 
 export default function App() {
   const { theme, toggle: toggleTheme } = useTheme();
@@ -57,7 +59,6 @@ export default function App() {
   const [rendering, setRendering] = useState(false);
   const previewRequest = useRef(0);
   const refreshRequest = useRef(0);
-  const [verification, setVerification] = useState<VerificationRun | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -102,13 +103,13 @@ export default function App() {
     setRendering(false);
   }, []);
 
-  async function renderPreview() {
+  async function renderPreview(monitor: string | null) {
     const request = ++previewRequest.current;
     setPreview(null);
     setPreviewError(null);
     setRendering(true);
     try {
-      const frame = await api.preview();
+      const frame = await api.preview(monitor);
       if (request === previewRequest.current) setPreview(frame);
     } catch (err) {
       if (request === previewRequest.current) setPreviewError(String(err));
@@ -143,7 +144,6 @@ export default function App() {
     let cancelled = false;
     let unlisten: (() => void) | undefined;
     void (async () => {
-      const { listen } = await import("@tauri-apps/api/event");
       const stop = await listen("veil://changed", () => {
         invalidatePreview();
         void refresh("event", true);
@@ -172,7 +172,7 @@ export default function App() {
         await api.removeAppRules(window.app);
         await api.removeWindowRules(window.id);
       }
-      const report = await api.tick();
+      const report = await api.tick(false);
       await refresh("tick", true);
       reportProtection(report, `${window.app_name} ${enabled ? "rule saved" : "rule removed"}`);
     } catch (err) {
@@ -214,29 +214,23 @@ export default function App() {
   }
 
   async function releaseEverything() {
+    if (busy) return;
+    if (api.IN_TAURI) {
+      setConfirm({ title: "Disarm protection?", description: "Protected windows may become visible in the Surface or in a current share. Your rules are kept and automation is paused for this session until you arm again.", label: "Disarm", danger: true, action: () => { void disarmNow(); } });
+    } else {
+      await disarmNow();
+    }
+  }
+
+  async function disarmNow() {
     setBusy("release");
     invalidatePreview();
     try {
       const report = await api.releaseAll();
       await refresh("release", true);
       setError(null);
-      notify(report.failed.length ? `Release failed: ${report.failed.join("; ")}` : `Released ${report.released} windows · rules preserved`,
+      notify(report.failed.length ? `Release failed: ${report.failed.join("; ")}` : `Protection off · automation paused · rules kept`,
         report.failed.length ? "error" : "info");
-    } catch (err) {
-      setError(String(err));
-      notify(String(err), "error");
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function runVerification() {
-    setBusy("verify");
-    try {
-      const res = await api.verify();
-      setVerification(res);
-      setError(null);
-      notify(`Synthetic audit: ${res.outcome}`, res.outcome === "protected" ? "success" : "info");
     } catch (err) {
       setError(String(err));
       notify(String(err), "error");
@@ -280,9 +274,8 @@ export default function App() {
   }
 
   const defaultMode: ProtectionMode = caps?.modes.exclusion && caps.modes.exclusion.level !== "unsupported" ? "exclusion" : "surface";
-  const hasRules = profile?.rules.some((rule) => rule.enabled) ?? false;
   const appliedCount = inv?.applied.filter((record) => record.status.status === "applied").length ?? 0;
-  const isArmed = Boolean(inv?.armed) || (inv?.applied.length ?? 0) > 0;
+  const isArmed = Boolean(inv?.armed);
   const emptyInventory: Inventory = {
     windows: [],
     backend: { platform: caps?.platform ?? "linux_x11", name: "", live: false, note: "" },
@@ -293,14 +286,14 @@ export default function App() {
     { id: "nav-overview", label: "Go to Overview", group: "Navigation", icon: LayoutDashboard, shortcut: `${MOD}1`, run: () => setPage("overview") },
     { id: "nav-windows", label: "Go to Windows", group: "Navigation", icon: ListFilter, shortcut: `${MOD}2`, run: () => setPage("windows") },
     { id: "nav-surface", label: "Go to Veil Surface", group: "Navigation", icon: PanelsTopLeft, shortcut: `${MOD}3`, run: () => setPage("surface") },
-    { id: "nav-audit", label: "Go to Canary audit", group: "Navigation", icon: ScanSearch, shortcut: `${MOD}4`, run: () => setPage("audit") },
+    { id: "nav-audit", label: "Go to Capture test", group: "Navigation", icon: ScanSearch, shortcut: `${MOD}4`, run: () => setPage("audit") },
     { id: "nav-rules", label: "Go to Rules & automation", group: "Navigation", icon: Waypoints, shortcut: `${MOD}5`, run: () => setPage("rules") },
     { id: "nav-capabilities", label: "Go to Capabilities", group: "Navigation", icon: Settings2, shortcut: `${MOD}6`, run: () => setPage("capabilities") },
     { id: "nav-updates", label: "Go to Updates", group: "Navigation", icon: Download, shortcut: `${MOD}7`, run: () => setPage("updates") },
+    { id: "nav-settings", label: "Go to Settings", group: "Navigation", icon: Settings2, shortcut: `${MOD}8`, run: () => setPage("settings") },
     { id: "arm", label: isArmed ? "Disarm protection" : "Arm protection", group: "Protection", icon: isArmed ? ShieldOff : Shield, keywords: "toggle veil shield", run: toggleArm },
     { id: "protect-all", label: "Protect all windows", group: "Protection", icon: Sparkles, keywords: "bulk select everything", run: () => { void protectAllWindows(); } },
     { id: "open-surface", label: "Open Surface window", group: "Protection", icon: PanelsTopLeft, keywords: "share screen", run: () => { void api.openSurface().catch((e) => notify(String(e), "error")); } },
-    { id: "audit", label: "Run canary audit", group: "Verification", icon: ScanSearch, keywords: "synthetic test pixel", run: () => { setPage("audit"); void runVerification(); } },
     { id: "refresh", label: "Refresh inventory", group: "Verification", icon: RefreshCw, shortcut: `${MOD}R`, run: () => { void refresh(); } },
     { id: "theme", label: `Switch to ${theme === "dark" ? "light" : "dark"} theme`, group: "Preferences", icon: theme === "dark" ? Sun : Moon, shortcut: `${MOD}D`, run: toggleTheme },
     { id: "updates", label: "Check for updates", group: "Preferences", icon: Download, keywords: "upgrade release stable beta", run: () => { setPage("updates"); void updater.check("manual"); } },
@@ -316,9 +309,9 @@ export default function App() {
       if (mod && e.key.toLowerCase() === "k") { e.preventDefault(); setPaletteOpen((o) => !o); return; }
       if (mod && e.key.toLowerCase() === "d") { e.preventDefault(); toggleTheme(); return; }
       if (mod && e.key.toLowerCase() === "r") { e.preventDefault(); void refresh(); return; }
-      if (mod && /^[1-7]$/.test(e.key)) {
+      if (mod && /^[1-8]$/.test(e.key)) {
         e.preventDefault();
-        setPage((["overview", "windows", "surface", "audit", "rules", "capabilities", "updates"] as Page[])[Number(e.key) - 1]);
+        setPage((["overview", "windows", "surface", "audit", "rules", "capabilities", "updates", "settings"] as Page[])[Number(e.key) - 1]);
         return;
       }
       if (e.key === "Escape") { setPaletteOpen(false); setConfirm(null); }
@@ -330,8 +323,7 @@ export default function App() {
   function toggleArm() {
     if (busy || !profile) return;
     if (isArmed) void releaseEverything();
-    else if (hasRules) void armNow();
-    else setPage("windows");
+    else void armNow();
   }
 
   return (
@@ -349,7 +341,6 @@ export default function App() {
           version={updater.currentVersion}
           updateAvailable={Boolean(updater.update)}
           onToggleArm={toggleArm}
-          onOpenSurface={() => { void api.openSurface().catch((e) => notify(String(e), "error")); }}
         />
 
         <div className="flex min-w-0 flex-1 flex-col">
@@ -435,16 +426,31 @@ export default function App() {
                 preview={preview}
                 error={previewError}
                 busy={busy !== null || rendering}
-                onRender={() => void renderPreview()}
+                onRender={(monitor) => void renderPreview(monitor)}
+                onDisplayChange={invalidatePreview}
                 onOpen={() => { void api.openSurface().catch((e) => notify(String(e), "error")); }}
               />
             )}
             {page === "audit" && (
-              <AuditPage verification={verification} busy={busy !== null} onRun={() => void runVerification()} />
+              <AuditPage armed={isArmed} live={Boolean(inv?.backend.live)} />
             )}
             {page === "rules" && (
               <RulesPage
                 profile={profile}
+                windows={inv?.windows ?? []}
+                automationPaused={Boolean(inv?.automation_paused)}
+                caps={caps}
+                onAdd={async (app: AppKey, mode: ProtectionMode, enabled: boolean) => {
+                  setBusy("rules");
+                  invalidatePreview();
+                  try {
+                    await api.addAppRule(app, mode, enabled);
+                    const report = await api.tick(false);
+                    await refresh("rules", true);
+                    reportProtection(report, "Rule saved");
+                  } catch (err) { setError(String(err)); notify(String(err), "error"); }
+                  finally { setBusy(null); }
+                }}
                 busy={busy !== null}
                 onAutoArm={(v) => void setAutoArm(v)}
                 onToggleRule={async (id, enabled) => {
@@ -452,7 +458,7 @@ export default function App() {
                   invalidatePreview();
                   try {
                     await api.setRuleEnabled(id, enabled);
-                    const report = await api.tick();
+                    const report = await api.tick(false);
                     await refresh("rules", true);
                     reportProtection(report, "Rule updated");
                   } catch (err) { setError(String(err)); notify(String(err), "error"); }
@@ -463,7 +469,7 @@ export default function App() {
                   invalidatePreview();
                   try {
                     await api.removeRule(id);
-                    const report = await api.tick();
+                    const report = await api.tick(false);
                     await refresh("rules", true);
                     reportProtection(report, "Rule removed");
                   } catch (err) { setError(String(err)); notify(String(err), "error"); }
@@ -473,6 +479,7 @@ export default function App() {
               />
             )}
             {page === "capabilities" && <CapabilitiesPage caps={caps} matrix={matrix} />}
+            {page === "settings" && <SettingsPage theme={theme} onToggleTheme={toggleTheme} />}
             {page === "updates" && (
               <UpdatesPage
                 supported={updater.supported}
@@ -504,7 +511,7 @@ export default function App() {
               <kbd className="rounded border border-border bg-panel px-1.5 py-0.5 font-mono">{MOD}D</kbd>
               theme
               <span className="text-border-strong">·</span>
-              <kbd className="rounded border border-border bg-panel px-1.5 py-0.5 font-mono">{MOD}1–7</kbd>
+              <kbd className="rounded border border-border bg-panel px-1.5 py-0.5 font-mono">{MOD}1–8</kbd>
               navigate
             </span>
             <span className="flex items-center gap-1.5">

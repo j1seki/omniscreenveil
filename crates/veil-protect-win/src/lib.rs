@@ -53,14 +53,24 @@ impl WinBackend {
 
     /// Live inventory, used by the UI and the reconcile loop.
     pub fn list_windows(&self) -> Result<Vec<veil_core::WindowInfo>, WinError> {
+        self.inventory(true)
+    }
+
+    pub fn inventory(&self, icons: bool) -> Result<Vec<veil_core::WindowInfo>, WinError> {
         #[cfg(windows)]
         {
-            self.inner.list_windows()
+            self.inner.list_windows(icons)
         }
         #[cfg(not(windows))]
         {
+            let _ = icons;
             Err(WinError::NotWindows)
         }
+    }
+
+    #[cfg(windows)]
+    pub fn outputs() -> Result<Vec<(String, veil_core::Rect)>, WinError> {
+        win::outputs()
     }
 
     /// Capture the live Windows desktop as a BGRA frame for the Veil Surface.
@@ -173,8 +183,9 @@ mod win {
         DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
     };
     use windows_sys::Win32::Graphics::Gdi::{
-        BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, GetObjectW,
-        ReleaseDC, SelectObject, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, SRCCOPY,
+        BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, EnumDisplayMonitors,
+        GetDC, GetMonitorInfoW, GetObjectW, ReleaseDC, SelectObject, BITMAP, BITMAPINFO,
+        BITMAPINFOHEADER, DIB_RGB_COLORS, HDC, HMONITOR, MONITORINFOEXW, SRCCOPY,
     };
     use windows_sys::Win32::Security::{
         AdjustTokenPrivileges, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
@@ -578,6 +589,52 @@ mod win {
         }
     }
 
+    pub fn outputs() -> Result<Vec<(String, Rect)>, WinError> {
+        unsafe extern "system" fn collect(
+            monitor: HMONITOR,
+            _: HDC,
+            _: *mut RECT,
+            data: LPARAM,
+        ) -> BOOL {
+            let out = &mut *(data as *mut Vec<(String, Rect)>);
+            let mut info: MONITORINFOEXW = std::mem::zeroed();
+            info.monitorInfo.cbSize = std::mem::size_of_val(&info) as u32;
+            if GetMonitorInfoW(monitor, &mut info.monitorInfo) == 0 {
+                return 0;
+            }
+            let end = info
+                .szDevice
+                .iter()
+                .position(|c| *c == 0)
+                .unwrap_or(info.szDevice.len());
+            let (x, y, _, _) = virtual_screen_rect();
+            let r = info.monitorInfo.rcMonitor;
+            out.push((
+                String::from_utf16_lossy(&info.szDevice[..end]),
+                Rect::new(
+                    r.left - x,
+                    r.top - y,
+                    (r.right - r.left) as u32,
+                    (r.bottom - r.top) as u32,
+                ),
+            ));
+            TRUE
+        }
+        let mut out = Vec::new();
+        if unsafe {
+            EnumDisplayMonitors(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                Some(collect),
+                &mut out as *mut _ as LPARAM,
+            )
+        } == 0
+        {
+            return Err(last_error("EnumDisplayMonitors"));
+        }
+        Ok(out)
+    }
+
     pub struct Inner {
         injected: BTreeSet<u32>,
         /// window -> (pid, mode) so release knows what to undo and strict-hidden
@@ -594,7 +651,7 @@ mod win {
             })
         }
 
-        pub fn list_windows(&self) -> Result<Vec<WindowInfo>, WinError> {
+        pub fn list_windows(&self, icons: bool) -> Result<Vec<WindowInfo>, WinError> {
             let (vx, vy, _, _) = unsafe { virtual_screen_rect() };
             let mut raw: Vec<RawWindow> = Vec::new();
             unsafe {
@@ -641,10 +698,14 @@ mod win {
                 if exe.is_empty() {
                     continue;
                 }
-                let icon = icon_cache
-                    .entry(window.pid)
-                    .or_insert_with(|| app_icon(&exe))
-                    .clone();
+                let icon = if icons {
+                    icon_cache
+                        .entry(window.pid)
+                        .or_insert_with(|| app_icon(&exe))
+                        .clone()
+                } else {
+                    String::new()
+                };
                 let app_name = exe
                     .rsplit(['\\', '/'])
                     .next()

@@ -117,6 +117,40 @@ impl X11Platform {
         self.root
     }
 
+    pub fn outputs(&self) -> Vec<(String, Rect)> {
+        use x11rb::protocol::randr::ConnectionExt as _;
+        let Some(reply) = self
+            .conn
+            .randr_get_monitors(self.root, true)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+        else {
+            return Vec::new();
+        };
+        reply
+            .monitors
+            .into_iter()
+            .map(|monitor| {
+                let name = self
+                    .conn
+                    .get_atom_name(monitor.name)
+                    .ok()
+                    .and_then(|cookie| cookie.reply().ok())
+                    .map(|reply| String::from_utf8_lossy(&reply.name).into_owned())
+                    .unwrap_or_else(|| format!("Display {}", monitor.name));
+                (
+                    name,
+                    Rect::new(
+                        monitor.x.into(),
+                        monitor.y.into(),
+                        monitor.width.into(),
+                        monitor.height.into(),
+                    ),
+                )
+            })
+            .collect()
+    }
+
     /// Whether an X11 compositing manager currently owns this screen.
     ///
     /// A compositor keeps a complete offscreen pixmap per window, which lets

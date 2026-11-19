@@ -5,6 +5,7 @@
 //! Veil Surface compositor and the canary verifier. No policy lives here.
 
 mod backend;
+mod preferences;
 
 use std::collections::BTreeSet;
 use std::sync::Mutex;
@@ -22,9 +23,9 @@ use veil_core::recovery::{
     intended_snapshot, matches_live, snapshot as recovery_snapshot, RecoveryJournal, RecoveryRecord,
 };
 use veil_core::state::AppliedProtection;
-use veil_core::{plan, AutoArm, ConfigStore, FillStyle, Profile, Size, WindowInfo};
+use veil_core::{plan, AutoArm, ConfigStore, FillStyle, Profile, Rect, WindowInfo};
 use veil_protect::{Engine, ProtectionBackend, TickReport};
-use veil_verify::{SyntheticCapture, SyntheticDesktop, VerificationHarness, VerificationRun};
+use veil_surface::Frame;
 
 use backend::{BackendInfo, DesktopBackend};
 
@@ -34,6 +35,8 @@ pub struct AppState {
     info: BackendInfo,
     /// User intent from "Arm now"/"Release all"; auto-arm can override it.
     armed: bool,
+    /// Session override: disarming must not rewrite the saved automation policy.
+    paused: bool,
     /// Journal of protections with OS-visible side effects for crash recovery.
     recovery: RecoveryJournal,
 }
@@ -116,6 +119,7 @@ pub struct Inventory {
     applied: Vec<AppliedProtection>,
     armed: bool,
     capture_active: bool,
+    automation_paused: bool,
     mac_permissions: Option<MacPermissions>,
 }
 
@@ -174,6 +178,7 @@ pub struct SurfacePreview {
     height: u32,
     masked: usize,
     source: String,
+    armed: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -211,18 +216,18 @@ fn capability_matrix() -> Vec<PlatformCapabilities> {
 }
 
 #[tauri::command]
-fn inventory(state: State<'_, Mutex<AppState>>) -> Result<Inventory, String> {
+async fn inventory(state: State<'_, Mutex<AppState>>) -> Result<Inventory, String> {
     let state = lock(&state)?;
-    let windows = state.engine.backend.list_windows()?;
+    let windows = state.engine.backend.inventory(true)?;
     let capture_active = veil_core::capture_app_running(&windows);
-    let armed =
-        state.engine.should_arm(&windows, state.armed) || !state.engine.applied().is_empty();
+    let armed = !state.paused && state.engine.should_arm(&windows, state.armed);
     Ok(Inventory {
         windows,
         backend: state.info.clone(),
         applied: state.engine.applied(),
         armed,
         capture_active,
+        automation_paused: state.paused,
         mac_permissions: match &state.engine.backend {
             #[cfg(target_os = "macos")]
             DesktopBackend::Mac(backend) => Some(MacPermissions {
@@ -235,7 +240,7 @@ fn inventory(state: State<'_, Mutex<AppState>>) -> Result<Inventory, String> {
 }
 
 #[tauri::command]
-fn get_profile(state: State<'_, Mutex<AppState>>) -> Result<Profile, String> {
+async fn get_profile(state: State<'_, Mutex<AppState>>) -> Result<Profile, String> {
     Ok(lock(&state)?.engine.profile.clone())
 }
 
@@ -244,9 +249,37 @@ fn add_app_rule(
     state: State<'_, Mutex<AppState>>,
     app: AppKey,
     mode: ProtectionMode,
+    enabled: Option<bool>,
 ) -> Result<Profile, String> {
+    if app.as_str().trim().is_empty() {
+        return Err("Enter an application identity first.".into());
+    }
+    #[cfg(target_os = "macos")]
+    let app = match app {
+        AppKey::MacBundle(path) if path.starts_with('/') && path.ends_with(".app") => {
+            let plist = std::path::Path::new(&path).join("Contents/Info.plist");
+            let output = std::process::Command::new("/usr/bin/plutil")
+                .args(["-extract", "CFBundleIdentifier", "raw", "-o", "-", "--"])
+                .arg(plist)
+                .output()
+                .map_err(|err| err.to_string())?;
+            let bundle = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            if !output.status.success() || bundle.is_empty() {
+                return Err(
+                    "Could not read that app bundle. Enter its bundle ID or an existing .app path."
+                        .into(),
+                );
+            }
+            AppKey::MacBundle(bundle)
+        }
+        other => other,
+    };
     let mut state = lock(&state)?;
-    state.engine.profile.add_app_rule(app, mode);
+    let id = state.engine.profile.add_app_rule(app, mode);
+    state
+        .engine
+        .profile
+        .set_enabled(id, enabled.unwrap_or(true));
     state.save()?;
     Ok(state.engine.profile.clone())
 }
@@ -266,6 +299,7 @@ fn add_window_rule(
 /// Protect every app that currently owns a protectable window.
 #[tauri::command]
 fn protect_all(
+    app: tauri::AppHandle,
     state: State<'_, Mutex<AppState>>,
     mode: ProtectionMode,
 ) -> Result<TickReport, String> {
@@ -280,6 +314,7 @@ fn protect_all(
         .collect();
     state.engine.profile.protect_all(&windows, mode);
     state.armed = true;
+    state.paused = false;
     let reconcile = plan(&state.engine.profile, &windows, &state.engine.applied());
     let mut records = state.recovery.load().map_err(|err| err.to_string())?;
     for mode in [ProtectionMode::StrictHide, ProtectionMode::Exclusion] {
@@ -307,6 +342,8 @@ fn protect_all(
     state.journal();
     state.engine.drain_events();
     state.save()?;
+    drop(state);
+    let _ = app.emit("veil://changed", ());
     Ok(report)
 }
 
@@ -377,10 +414,20 @@ fn reset_profile(state: State<'_, Mutex<AppState>>) -> Result<Profile, String> {
 }
 
 #[tauri::command]
-fn tick(state: State<'_, Mutex<AppState>>) -> Result<TickReport, String> {
+fn tick(
+    app: tauri::AppHandle,
+    state: State<'_, Mutex<AppState>>,
+    arm: Option<bool>,
+) -> Result<TickReport, String> {
     let mut state = lock(&state)?;
     let windows = state.engine.backend.list_windows()?;
-    state.armed = true;
+    if arm.unwrap_or(true) {
+        state.armed = true;
+        state.paused = false;
+    }
+    if state.paused || !state.engine.should_arm(&windows, state.armed) {
+        return Ok(TickReport::default());
+    }
     let reconcile = plan(&state.engine.profile, &windows, &state.engine.applied());
     let mut journal_records: Vec<_> = state
         .recovery
@@ -413,14 +460,24 @@ fn tick(state: State<'_, Mutex<AppState>>) -> Result<TickReport, String> {
         .map_err(|err| err.to_string())?;
     let report = state.engine.tick(&windows);
     state.journal();
+    state.engine.drain_events();
+    drop(state);
+    let _ = app.emit("veil://changed", ());
     Ok(report)
 }
 
 #[tauri::command]
-fn set_auto_arm(state: State<'_, Mutex<AppState>>, auto_arm: AutoArm) -> Result<Profile, String> {
+fn set_auto_arm(
+    app: tauri::AppHandle,
+    state: State<'_, Mutex<AppState>>,
+    auto_arm: AutoArm,
+) -> Result<Profile, String> {
     let mut state = lock(&state)?;
     state.engine.profile.auto_arm = auto_arm;
-    if let Ok(windows) = state.engine.backend.list_windows() {
+    if let Some(windows) = (!state.paused)
+        .then(|| state.engine.backend.list_windows().ok())
+        .flatten()
+    {
         let explicit = state.armed;
         let reconcile = plan(&state.engine.profile, &windows, &state.engine.applied());
         let mut intended = Vec::new();
@@ -467,16 +524,20 @@ fn set_auto_arm(state: State<'_, Mutex<AppState>>, auto_arm: AutoArm) -> Result<
         state.journal();
     }
     state.save()?;
-    Ok(state.engine.profile.clone())
+    let profile = state.engine.profile.clone();
+    drop(state);
+    let _ = app.emit("veil://changed", ());
+    Ok(profile)
 }
 
 #[tauri::command]
-fn release_all(state: State<'_, Mutex<AppState>>) -> Result<ReleaseReport, String> {
+fn release_all(
+    app: tauri::AppHandle,
+    state: State<'_, Mutex<AppState>>,
+) -> Result<ReleaseReport, String> {
     let mut state = lock(&state)?;
     state.armed = false;
-    // A release must remain released instead of auto-arming again two seconds later.
-    state.engine.profile.auto_arm = AutoArm::Off;
-    state.save()?;
+    state.paused = true;
     let results = state.engine.release_all();
     let mut pending = Vec::new();
     for (window, error) in &results {
@@ -505,6 +566,8 @@ fn release_all(state: State<'_, Mutex<AppState>>) -> Result<ReleaseReport, Strin
         .iter()
         .filter_map(|(window, err)| err.as_ref().map(|err| format!("{window}: {err}")))
         .collect::<Vec<_>>();
+    drop(state);
+    let _ = app.emit("veil://changed", ());
     Ok(ReleaseReport {
         released: results.len() - failed.len(),
         failed,
@@ -517,13 +580,92 @@ fn release_all(state: State<'_, Mutex<AppState>>) -> Result<ReleaseReport, Strin
 /// desktop, and always labels which one in `source`.
 // Capture can take seconds on macOS; never run it on the webview event loop.
 #[tauri::command]
-async fn preview(state: State<'_, Mutex<AppState>>) -> Result<SurfacePreview, String> {
-    render_preview(state.inner())
+async fn preview(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    monitor: Option<String>,
+    motion: Option<bool>,
+    live_only: Option<bool>,
+) -> Result<SurfacePreview, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if window.is_minimized().unwrap_or(false) || !window.is_visible().unwrap_or(false) {
+            return Err("Capture paused while this window is hidden.".into());
+        }
+        let state = app.state::<Mutex<AppState>>();
+        render_preview(
+            state.inner(),
+            monitor.as_deref(),
+            motion.unwrap_or(false),
+            live_only.unwrap_or(false),
+        )
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct Display {
+    id: String,
+    name: String,
+    bounds: Rect,
+}
+
+fn displays(backend: &DesktopBackend) -> Result<Vec<Display>, String> {
+    let named = |(name, bounds): (String, Rect)| Display {
+        id: name.clone(),
+        name,
+        bounds,
+    };
+    let outputs = match backend {
+        #[cfg(target_os = "linux")]
+        DesktopBackend::X11(x11) => x11.platform().outputs().into_iter().map(named).collect(),
+        #[cfg(target_os = "linux")]
+        DesktopBackend::Wayland(wayland) => wayland
+            .outputs()
+            .map_err(|err| err.to_string())?
+            .into_iter()
+            .map(named)
+            .collect(),
+        #[cfg(windows)]
+        DesktopBackend::Windows(_) => veil_protect_win::WinBackend::outputs()
+            .map_err(|err| err.to_string())?
+            .into_iter()
+            .map(named)
+            .collect(),
+        #[cfg(target_os = "macos")]
+        DesktopBackend::Mac(mac) => mac
+            .displays()
+            .map_err(|err| err.to_string())?
+            .into_iter()
+            .map(|d| Display {
+                id: d.id.to_string(),
+                name: d.name,
+                bounds: d.bounds,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let _ = named;
+    let mut outputs: Vec<Display> = outputs;
+    outputs.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(outputs)
+}
+
+#[tauri::command]
+async fn surface_displays(app: tauri::AppHandle) -> Result<Vec<Display>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<Mutex<AppState>>();
+        let guard = lock(&state)?;
+        displays(&guard.engine.backend)
+    })
+    .await
+    .map_err(|err| err.to_string())?
 }
 
 fn surface_targets<B: ProtectionBackend>(
     engine: &Engine<B>,
     armed: bool,
+    paused: bool,
     windows: &[WindowInfo],
 ) -> BTreeSet<WindowId> {
     let mut surface: BTreeSet<WindowId> = engine
@@ -537,7 +679,7 @@ fn surface_targets<B: ProtectionBackend>(
 
     // The monitor is periodic. Don't expose newly opened windows that match
     // armed Surface rules while waiting for the next reconciliation pass.
-    if engine.should_arm(windows, armed) {
+    if !paused && engine.should_arm(windows, armed) {
         surface.extend(
             engine
                 .plan(windows)
@@ -570,6 +712,20 @@ mod surface_tests {
     }
 
     #[test]
+    fn reduced_preview_reads_only_pixels_within_the_selected_display() {
+        let red = veil_core::Color::rgb(255, 0, 0);
+        let blue = veil_core::Color::rgb(0, 0, 255);
+        let mut desktop = Frame::filled(8, 4, veil_surface::PixelFormat::Bgra8, red);
+        desktop.fill_rect(Rect::new(4, 0, 4, 4), FillStyle::Solid { color: blue });
+        let preview = sample_frame(&desktop, Rect::new(4, 0, 4, 4), 2, 2);
+        assert_eq!(preview.size(), veil_core::Size::new(2, 2));
+        assert!(preview
+            .pixels
+            .chunks_exact(4)
+            .all(|p| p == [255, 0, 0, 255]));
+    }
+
+    #[test]
     fn surface_covers_new_matches_before_monitor_ticks_but_not_when_disarmed() {
         let app = AppKey::MacBundle("example.demo".into());
         let mut profile = Profile::new();
@@ -591,15 +747,25 @@ mod surface_tests {
         }];
         assert!(engine.applied().is_empty());
         assert_eq!(
-            surface_targets(&engine, true, &windows),
+            surface_targets(&engine, true, false, &windows),
             BTreeSet::from([WindowId(42)])
         );
-        assert!(surface_targets(&engine, false, &windows).is_empty());
+        assert!(surface_targets(&engine, false, false, &windows).is_empty());
+        assert!(surface_targets(&engine, true, true, &windows).is_empty());
     }
 }
 
-fn render_preview(state: &Mutex<AppState>) -> Result<SurfacePreview, String> {
+fn render_preview(
+    state: &Mutex<AppState>,
+    monitor: Option<&str>,
+    motion: bool,
+    live_only: bool,
+) -> Result<SurfacePreview, String> {
     let state = state.lock().map_err(|err| err.to_string())?;
+    if live_only && !state.info.live {
+        return Err("A live desktop backend is required for the capture test.".into());
+    }
+    let max_edge = if motion { 960 } else { 1920 };
     #[cfg(target_os = "macos")]
     if matches!(&state.engine.backend, DesktopBackend::Mac(_))
         && !veil_protect_macos::MacBackend::screen_recording_granted()
@@ -607,27 +773,70 @@ fn render_preview(state: &Mutex<AppState>) -> Result<SurfacePreview, String> {
         return Err("Allow Screen Recording in OmniScreenVeil's main window to use the Veil Surface. macOS may require quitting and reopening the app.".into());
     }
     let windows = state.engine.backend.list_windows()?;
-    let surface = surface_targets(&state.engine, state.armed, &windows);
+    let surface = surface_targets(&state.engine, state.armed, state.paused, &windows);
+    let armed = !state.paused && state.engine.should_arm(&windows, state.armed);
+    let outputs = displays(&state.engine.backend)?;
+    let selected = monitor
+        .map(|id| {
+            outputs
+                .iter()
+                .find(|display| display.id == id)
+                .ok_or_else(|| "Selected display is no longer available.".to_string())
+        })
+        .transpose()?;
 
     #[cfg(target_os = "macos")]
     if let DesktopBackend::Mac(backend) = &state.engine.backend {
-        let frame = backend
-            .capture_filtered(&surface)
-            .map_err(|err| err.to_string())?;
+        let active: Vec<_> = if let Some(display) = selected {
+            vec![display]
+        } else {
+            outputs.iter().collect()
+        };
+        let desktop = active
+            .iter()
+            .map(|display| display.bounds)
+            .reduce(|a, b| a.union(&b))
+            .ok_or("No active displays found.")?;
+        let scale = f64::from(max_edge).min(f64::from(desktop.w.max(desktop.h)))
+            / f64::from(desktop.w.max(desktop.h));
+        let map = |r: Rect| {
+            Rect::new(
+                (f64::from(r.x - desktop.x) * scale).round() as i32,
+                (f64::from(r.y - desktop.y) * scale).round() as i32,
+                (f64::from(r.w) * scale).round().max(1.0) as u32,
+                (f64::from(r.h) * scale).round().max(1.0) as u32,
+            )
+        };
+        let canvas = map(desktop);
+        let mut frame = Frame::new(canvas.w, canvas.h, veil_surface::PixelFormat::Bgra8);
+        for display in active {
+            let dest = map(display.bounds);
+            let capture = backend
+                .capture_display(
+                    display.id.parse::<u32>().map_err(|err| err.to_string())?,
+                    &surface,
+                    dest.w.max(dest.h),
+                )
+                .map_err(|err| err.to_string())?;
+            let capture = sample_frame(&capture, capture.bounds(), dest.w, dest.h);
+            frame.blit_from(&capture, dest);
+        }
         // A new window can appear while ScreenCaptureKit is preparing the
         // frame. If the new inventory requires a different filter, drop it.
         let latest = backend.list_windows().map_err(|err| err.to_string())?;
-        if !surface_targets(&state.engine, state.armed, &latest).is_subset(&surface) {
+        if !surface_targets(&state.engine, state.armed, state.paused, &latest).is_subset(&surface)
+            || displays(&state.engine.backend)? != outputs
+        {
             return Err(
                 "Protected windows changed during capture; retrying with a new filter.".into(),
             );
         }
         let count = windows
             .iter()
-            .filter(|w| w.visible && surface.contains(&w.id))
+            .filter(|w| w.visible && surface.contains(&w.id) && w.bounds.intersects(&desktop))
             .count();
         drop(state);
-        return surface_preview(&frame, count, "ScreenCaptureKit · filtered main display");
+        return surface_preview(&frame, count, "ScreenCaptureKit · filtered capture", armed);
     }
 
     // Composited X11 excludes our windows inside the capture; Wayland's
@@ -637,7 +846,17 @@ fn render_preview(state: &Mutex<AppState>) -> Result<SurfacePreview, String> {
     } else {
         Vec::new()
     };
-    let (mut source_frame, source_label) = match state.engine.backend.capture_frame() {
+    let region = if state.info.platform == veil_core::Platform::LinuxWayland && state.info.live {
+        Some(
+            selected
+                .map(|display| display.bounds)
+                .or_else(|| outputs.iter().map(|d| d.bounds).reduce(|a, b| a.union(&b)))
+                .ok_or("Could not locate the Wayland outputs.")?,
+        )
+    } else {
+        None
+    };
+    let (mut source_frame, source_label) = match state.engine.backend.capture_frame(region) {
         Some(frame) => {
             let label = if own_windows.is_empty() {
                 "live capture"
@@ -653,29 +872,74 @@ fn render_preview(state: &Mutex<AppState>) -> Result<SurfacePreview, String> {
     // the frame if a protected window appeared, moved or resized in between.
     if state.info.live {
         let latest = state.engine.backend.list_windows()?;
-        let latest_targets = surface_targets(&state.engine, state.armed, &latest);
-        if !mask_geometry_stable(&windows, &surface, &latest, &latest_targets) {
+        let latest_targets = surface_targets(&state.engine, state.armed, state.paused, &latest);
+        if !mask_geometry_stable(&windows, &surface, &latest, &latest_targets)
+            || displays(&state.engine.backend)? != outputs
+            || (state.engine.backend.capture_includes_own_windows()
+                && state.engine.backend.own_windows() != own_windows)
+        {
             return Err("Protected windows changed during capture; retrying.".into());
         }
     }
     drop(state);
 
+    if region.is_some_and(|r| r.w != source_frame.width || r.h != source_frame.height) {
+        return Err("Unexpected capture scale; withholding the frame.".into());
+    }
+    let offset = |r: Rect| region.map_or(r, |capture| r.translated(-capture.x, -capture.y));
+    let crop = if region.is_none() {
+        selected
+            .map(|d| {
+                d.bounds
+                    .intersection(&source_frame.bounds())
+                    .ok_or("Display is outside the capture.")
+            })
+            .transpose()?
+    } else {
+        None
+    }
+    .unwrap_or_else(|| source_frame.bounds());
     let mut plan = veil_surface::SurfacePlan::new(source_frame.size(), FillStyle::veiled());
     let mut masked = 0usize;
     for window in &windows {
-        if surface.contains(&window.id) {
+        if surface.contains(&window.id) && offset(window.bounds).intersects(&crop) {
             let before = plan.exclusions.len();
-            plan = plan.exclude(window.bounds);
+            plan = plan.exclude(offset(window.bounds));
             if plan.exclusions.len() > before {
                 masked += 1;
             }
         }
     }
     for own in own_windows {
-        plan = plan.exclude(own);
+        plan = plan.exclude(offset(own));
     }
     veil_surface::apply_exclusions(&mut source_frame, &plan);
-    surface_preview(&source_frame, masked, source_label)
+    let scale =
+        f64::from(max_edge).min(f64::from(crop.w.max(crop.h))) / f64::from(crop.w.max(crop.h));
+    if crop == source_frame.bounds() && scale == 1.0 {
+        return surface_preview(&source_frame, masked, source_label, armed);
+    }
+    let frame = sample_frame(
+        &source_frame,
+        crop,
+        (f64::from(crop.w) * scale).max(1.0) as u32,
+        (f64::from(crop.h) * scale).max(1.0) as u32,
+    );
+    surface_preview(&frame, masked, source_label, armed)
+}
+
+fn sample_frame(source: &Frame, crop: Rect, width: u32, height: u32) -> Frame {
+    let mut out = Frame::new(width, height, source.format);
+    for y in 0..height as usize {
+        let from_y = crop.y as usize + y * crop.h as usize / height as usize;
+        for x in 0..width as usize {
+            let from_x = crop.x as usize + x * crop.w as usize / width as usize;
+            let from = 4 * (from_y * source.width as usize + from_x);
+            let to = 4 * (y * width as usize + x);
+            out.pixels[to..to + 4].copy_from_slice(&source.pixels[from..from + 4]);
+        }
+    }
+    out
 }
 
 fn mask_geometry_stable(
@@ -698,6 +962,7 @@ fn surface_preview(
     frame: &veil_surface::Frame,
     masked: usize,
     source: &str,
+    armed: bool,
 ) -> Result<SurfacePreview, String> {
     let png = encode_png(frame)?;
     Ok(SurfacePreview {
@@ -706,30 +971,8 @@ fn surface_preview(
         height: frame.height,
         masked,
         source: source.to_string(),
+        armed,
     })
-}
-
-/// Headless verification of the Surface guarantee.
-///
-/// Always records `CapturePath::Synthetic`, because that is the truth: the
-/// canary is composited and re-captured in-process. Live capture paths are
-/// verified per platform by the CLI harness.
-#[tauri::command]
-fn verify() -> Result<VerificationRun, String> {
-    let desktop = SyntheticDesktop::new(Size::new(960, 540));
-    let plan = desktop.protected_plan();
-    let mut harness = VerificationHarness::new(
-        SyntheticCapture::new(&desktop, None),
-        desktop.token(),
-        desktop.cell(),
-    )
-    .with_region(desktop.canary_rect());
-    harness
-        .run_with(|source| {
-            source.set_plan(Some(plan.clone()));
-            Ok(())
-        })
-        .map_err(|err| err.to_string())
 }
 
 fn encode_png(frame: &veil_surface::Frame) -> Result<Vec<u8>, String> {
@@ -808,13 +1051,9 @@ fn release_all_now(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<Mutex<AppState>>() {
         if let Ok(mut guard) = state.lock() {
             guard.armed = false;
-            let old_policy = guard.engine.profile.auto_arm;
-            guard.engine.profile.auto_arm = AutoArm::Off;
-            let _ = guard.save();
+            guard.paused = true;
             guard.engine.release_all();
             guard.engine.drain_events();
-            guard.engine.profile.auto_arm = old_policy;
-            let _ = guard.save();
             let pending: Vec<_> = if let Ok(windows) = guard.engine.backend.list_windows() {
                 guard
                     .engine
@@ -846,6 +1085,7 @@ fn arm_now(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<Mutex<AppState>>() {
         if let Ok(mut guard) = state.lock() {
             guard.armed = true;
+            guard.paused = false;
             if let Ok(windows) = guard.engine.backend.list_windows() {
                 let reconcile = plan(&guard.engine.profile, &windows, &guard.engine.applied());
                 let mut journal_records: Vec<_> = guard
@@ -887,18 +1127,23 @@ fn toggle_now(app: &tauri::AppHandle) {
     let armed = app
         .try_state::<Mutex<AppState>>()
         .and_then(|state| {
-            state
-                .lock()
-                .ok()
-                .map(|guard| guard.armed || !guard.engine.applied().is_empty())
+            state.lock().ok().map(|guard| {
+                !guard.paused
+                    && (guard.armed
+                        || !guard.engine.applied().is_empty()
+                        || match guard.engine.profile.auto_arm {
+                            AutoArm::Always => true,
+                            AutoArm::CaptureAppRunning => guard
+                                .engine
+                                .backend
+                                .list_windows()
+                                .is_ok_and(|windows| veil_core::capture_app_running(&windows)),
+                            AutoArm::Off => false,
+                        })
+            })
         })
         .unwrap_or(false);
     if armed {
-        if let Some(state) = app.try_state::<Mutex<AppState>>() {
-            if let Ok(mut guard) = state.lock() {
-                guard.engine.profile.auto_arm = AutoArm::Off;
-            }
-        }
         release_all_now(app);
     } else {
         arm_now(app);
@@ -922,7 +1167,7 @@ fn start_auto_monitor(app: tauri::AppHandle) {
         let needs_scan = guard.armed
             || !guard.engine.applied().is_empty()
             || guard.engine.profile.auto_arm != AutoArm::Off;
-        if !needs_scan {
+        if guard.paused || !needs_scan {
             continue;
         }
         let windows = match guard.engine.backend.list_windows() {
@@ -952,32 +1197,37 @@ fn start_auto_monitor(app: tauri::AppHandle) {
 /// Open (or focus) the clean window the user shares.
 ///
 /// The main window contains controls and is not what an audience should see.
-/// This second webview renders only the composited frame, polls `preview`, and
-/// carries no chrome. It is created lazily so a user who only needs Exclusion
+/// This second webview renders the composited frame and offers display selection.
+/// It is created lazily so a user who only needs Exclusion
 /// never pays for it.
 fn open_surface_window(app: &tauri::AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("surface") {
         let _ = window.show();
+        let _ = window.unminimize();
         let _ = window.set_focus();
         return Ok(());
     }
-    tauri::WebviewWindowBuilder::new(
-        app,
-        "surface",
-        tauri::WebviewUrl::App("index.html?surface=1".into()),
-    )
-    .title("OmniScreenVeil Surface")
-    .inner_size(960.0, 600.0)
-    .min_inner_size(480.0, 320.0)
-    .background_color(tauri::window::Color(11, 13, 18, 255))
-    .build()
-    .map_err(|err| err.to_string())?;
+    tauri::WebviewWindowBuilder::new(app, "surface", tauri::WebviewUrl::App("index.html".into()))
+        .title("OmniScreenVeil Surface")
+        .inner_size(960.0, 600.0)
+        .min_inner_size(480.0, 320.0)
+        .background_color(tauri::window::Color(11, 13, 18, 255))
+        .build()
+        .map_err(|err| err.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
-fn open_surface(app: tauri::AppHandle) -> Result<(), String> {
+async fn open_surface(app: tauri::AppHandle) -> Result<(), String> {
     open_surface_window(&app)
+}
+
+#[tauri::command]
+async fn close_surface(window: tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() != "surface" {
+        return Err("Not the Surface window.".into());
+    }
+    window.close().map_err(|err| err.to_string())
 }
 
 /// Update channel selected by the user. Endpoints are chosen at runtime so
@@ -1159,6 +1409,7 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
@@ -1187,8 +1438,12 @@ pub fn run() {
             set_auto_arm,
             release_all,
             preview,
-            verify,
+            surface_displays,
             open_surface,
+            close_surface,
+            preferences::get_preferences,
+            preferences::save_preferences,
+            preferences::login_startup,
             check_update,
             install_update,
             restart_app,
@@ -1213,6 +1468,9 @@ pub fn run() {
                     Profile::new()
                 }
             };
+            app.manage(preferences::PreferenceStore::new(
+                store.with_file_name("desktop-settings.json"),
+            ));
             let (mut backend, info) = DesktopBackend::detect();
             let recovery =
                 RecoveryJournal::new(store.parent().unwrap_or_else(|| std::path::Path::new(".")));
@@ -1297,6 +1555,7 @@ pub fn run() {
                 store: ConfigStore::new(store),
                 info,
                 armed: false,
+                paused: false,
                 recovery,
             }));
 
@@ -1328,21 +1587,20 @@ pub fn run() {
                     "open" => {
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.show();
+                            let _ = window.unminimize();
                             let _ = window.set_focus();
                         }
                     }
                     "surface" => {
-                        if let Err(err) = open_surface_window(app) {
-                            eprintln!("veil: could not open surface window: {err}");
-                        }
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(err) = open_surface_window(&app) {
+                                eprintln!("veil: could not open surface window: {err}");
+                            }
+                        });
                     }
                     "arm" => toggle_now(app),
                     "release" => {
-                        if let Some(state) = app.try_state::<Mutex<AppState>>() {
-                            if let Ok(mut guard) = state.lock() {
-                                guard.engine.profile.auto_arm = AutoArm::Off;
-                            }
-                        }
                         release_all_now(app);
                     }
                     "quit" => app.exit(0),
@@ -1358,6 +1616,18 @@ pub fn run() {
 
             start_auto_monitor(app.handle().clone());
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    if preferences::minimize_on_close(window.app_handle()) {
+                        let _ = window.minimize();
+                    } else {
+                        window.app_handle().exit(0);
+                    }
+                }
+            }
         })
         .build(tauri::generate_context!())
         .expect("error while building OmniScreenVeil");

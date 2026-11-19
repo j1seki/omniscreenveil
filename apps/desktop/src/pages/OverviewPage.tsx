@@ -76,8 +76,8 @@ export function OverviewPage({
   const protectedCount = inventory.applied.filter((record) => record.status.status === "applied").length;
   const failures = inventory.applied.filter((record) => record.status.status === "failed").length;
   const captureCount = windows.filter(isCaptureWindow).length;
-  const armed = Boolean(inventory.armed) || inventory.applied.length > 0;
-  const topWindows = windows.slice(0, 5);
+  const armed = Boolean(inventory.armed);
+  const topWindows = windows.filter((w) => w.platform !== "mac_os" || w.title.trim() || w.bounds.w > 80 || w.bounds.h > 80).slice(0, 5);
 
   return (
     <div className="animate-page-in space-y-4">
@@ -183,6 +183,7 @@ export function OverviewPage({
                   type="button"
                   disabled={busy}
                   onClick={() => onToggleWindow(win)}
+                  title={rule ? "Remove the saved protection rule" : "Add a protection rule for this app"}
                   className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-hover/60"
                 >
                   <AppGlyph name={win.app_name} icon={win.icon} size={20} />

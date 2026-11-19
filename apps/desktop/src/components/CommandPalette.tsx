@@ -108,7 +108,8 @@ export function CommandPalette({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Type a command or search…"
-            className="h-full flex-1 bg-transparent text-[14px] text-text outline-none placeholder:text-faint"
+            aria-label="Search quick actions"
+            className="command-search h-full min-w-0 flex-1 bg-transparent text-[14px] text-text placeholder:text-faint"
           />
           <kbd className="rounded border border-border bg-elevated px-1.5 py-0.5 font-mono text-[10px] text-faint">
             ESC

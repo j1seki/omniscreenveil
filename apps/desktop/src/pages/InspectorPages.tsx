@@ -1,24 +1,25 @@
+import { useEffect, useState } from "react";
+import * as api from "../api";
 import {
   AppWindow,
-  CheckCircle2,
-  CircleHelp,
   ExternalLink,
   RefreshCw,
-  ScanSearch,
   ShieldCheck,
   Trash2,
-  XCircle,
 } from "lucide-react";
 import type {
   AutoArm,
+  AppKey,
   Capabilities,
+  Display,
   Profile,
+  ProtectionMode,
   SurfacePreview,
-  VerificationRun,
+  WindowInfo,
 } from "../types";
 import { LEVEL_BADGES, MODES, PLATFORM_LABELS, levelDetail, modeLabel } from "../types";
 import { cn } from "../lib/utils";
-import { CanaryGrid } from "../components/Visuals";
+import { DisplayPicker } from "../components/DisplayPicker";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Switch } from "../components/ui/switch";
@@ -29,14 +30,20 @@ export function SurfacePage({
   error,
   busy,
   onRender,
+  onDisplayChange,
   onOpen,
 }: {
   preview: SurfacePreview | null;
   error: string | null;
   busy: boolean;
-  onRender: () => void;
+  onRender: (display: string | null) => void;
+  onDisplayChange: () => void;
   onOpen: () => void;
 }) {
+  const [outputs, setOutputs] = useState<Display[]>([]);
+  const [display, setDisplay] = useState<string | null>(null);
+  useEffect(() => { void api.surfaceDisplays().then(setOutputs, () => {}); }, []);
+  useEffect(() => { onDisplayChange(); }, [onDisplayChange]);
   return (
     <div className="animate-page-in space-y-4">
       <div className="flex items-center justify-between">
@@ -45,15 +52,16 @@ export function SurfacePage({
           <p className="mt-0.5 text-[12px] text-muted">
             {preview
               ? `${preview.width}×${preview.height} · ${preview.masked} windows or regions covered · ${preview.source}`
-              : "Render a frame to check what the audience will see."}
+              : "Render a frame to check what the audience will see. The share window has its own display picker."}
           </p>
         </div>
         <div className="flex gap-2">
-          <Button variant="secondary" size="sm" onClick={onRender} disabled={busy} className="h-8 text-[12px]">
+          <DisplayPicker displays={outputs} value={display} onChange={(value) => { onDisplayChange(); setDisplay(value); }} />
+          <Button variant="secondary" size="sm" onClick={() => onRender(display)} disabled={busy} title="Capture a single filtered frame" className="h-8 text-[12px]">
             <RefreshCw className={cn("size-3.5", busy && "animate-spin")} />
             {preview ? "Re-render" : "Render preview"}
           </Button>
-          <Button size="sm" onClick={onOpen} disabled={busy} className="h-8 text-[12px]">
+          <Button size="sm" onClick={onOpen} disabled={busy} title="Open the shareable Surface window" className="h-8 text-[12px]">
             <ExternalLink className="size-3.5" />
             Open Surface window
           </Button>
@@ -101,11 +109,11 @@ export function SurfacePage({
           },
           {
             title: "Stay in control locally",
-            text: "Surface rules leave windows usable locally. macOS filters them from this app’s main-display capture; other backends mask them. Other apps’ desktop captures are unchanged.",
+            text: "Surface rules leave windows usable locally. macOS filters them from this app’s capture; other backends mask them. Other apps’ desktop captures are unchanged.",
           },
           {
             title: "Test before you share",
-            text: "The audit is synthetic. Check the preview source and verify the dedicated Surface in your actual sharing application before exposing sensitive content.",
+            text: "Compare real Surface frames in Capture test, then check the result in your actual sharing application before exposing sensitive content.",
           },
         ].map((item, i) => (
           <div key={item.title} className="rounded-lg border border-border bg-panel p-3.5">
@@ -119,91 +127,45 @@ export function SurfacePage({
   );
 }
 
-/* ------------------------------ Canary ----------------------------------- */
-function Outcome({ outcome }: { outcome: VerificationRun["outcome"] }) {
-  const map = {
-    protected: { icon: CheckCircle2, text: "Self-test passed", cls: "text-success" },
-    visible: { icon: XCircle, text: "Token visible", cls: "text-danger" },
-    inconclusive: { icon: CircleHelp, text: "Inconclusive", cls: "text-warning" },
-  }[outcome];
-  const Icon = map.icon;
-  return (
-    <span className={cn("inline-flex items-center gap-1.5 text-[13px] font-semibold", map.cls)}>
-      <Icon className="size-4" />
-      {map.text}
-    </span>
-  );
-}
-
-export function AuditPage({
-  verification,
-  busy,
-  onRun,
-}: {
-  verification: VerificationRun | null;
-  busy: boolean;
-  onRun: () => void;
-}) {
-  return (
-    <div className="animate-page-in space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-[14px] font-semibold text-text">Synthetic pixel self-test</h2>
-          <p className="mt-0.5 text-[12px] text-muted">
-            Deterministic 8×8 canary · baseline → veil → re-capture
-          </p>
-        </div>
-        <Button size="sm" onClick={onRun} disabled={busy} className="h-8 text-[12px]">
-          <ScanSearch className={cn("size-3.5", busy && "animate-pulse")} />
-          {busy ? "Auditing…" : "Run audit"}
-        </Button>
-      </div>
-
-      <div className="rounded-xl border border-warning/25 bg-warning-soft px-4 py-3 text-[12px] text-muted">
-        <strong className="text-warning">Synthetic check.</strong> This composites a canary into an
-        in-memory frame and verifies the veil removes it. It does not inspect your real windows,
-        OS capture, or the sharing application you use. Test the real capture path before sharing.
-      </div>
-
-      <CanaryGrid verification={verification} busy={busy} />
-
-      {verification && (
-        <div className="rounded-xl border border-border bg-panel p-4">
-          <div className="flex items-center justify-between">
-            <Outcome outcome={verification.outcome} />
-            <Badge variant="default" className="font-mono text-[10px] uppercase">
-              {verification.record.path}
-            </Badge>
-          </div>
-          <div className="mt-3 grid grid-cols-2 gap-3">
-            <div className="rounded-lg border border-border bg-app p-3">
-              <p className="text-[10px] uppercase tracking-wide text-faint">Baseline</p>
-              <p className="mt-1 text-[12px] font-medium text-text">
-                {verification.baseline.found ? `Canary visible · ${verification.baseline.matched}/64` : "Not seen"}
-              </p>
-            </div>
-            <div className="rounded-lg border border-border bg-app p-3">
-              <p className="text-[10px] uppercase tracking-wide text-faint">After arming</p>
-              <p className="mt-1 text-[12px] font-medium text-text">
-                {verification.after.found ? `Canary visible · ${verification.after.matched}/64` : `Canary absent · ${verification.after.matched}/64`}
-              </p>
-            </div>
-          </div>
-          <p className="mt-3 text-[12px] leading-relaxed text-muted">{verification.record.detail}</p>
-          <dl className="mt-3 flex gap-6 border-t border-border pt-3 font-mono text-[11px]">
-            <div>
-              <dt className="text-faint">CHECKED</dt>
-              <dd className="mt-0.5 text-muted">{new Date(verification.record.checked_at_unix * 1000).toLocaleString()}</dd>
-            </div>
-            <div>
-              <dt className="text-faint">BUILD</dt>
-              <dd className="mt-0.5 text-muted">{verification.record.os_build}</dd>
-            </div>
-          </dl>
-        </div>
-      )}
+export function AuditPage({ armed, live }: { armed: boolean; live: boolean }) {
+  const [frames, setFrames] = useState<{ off?: SurfacePreview; on?: SurfacePreview }>({});
+  const [error, setError] = useState<string | null>(null);
+  const [capturing, setCapturing] = useState(false);
+  const [displays, setDisplays] = useState<Display[]>([]);
+  const [display, setDisplay] = useState<string | null>(null);
+  useEffect(() => { void api.surfaceDisplays().then(setDisplays, () => {}); }, []);
+  async function capture() {
+    setCapturing(true);
+    setError(null);
+    try {
+      const frame = await api.preview(display, false, true);
+      if (frame.armed !== armed) throw new Error("Protection changed during this step. Capture again.");
+      setFrames((old) => ({ ...old, [armed ? "on" : "off"]: frame }));
+    } catch (err) { setError(String(err)); }
+    finally { setCapturing(false); }
+  }
+  return <div className="animate-page-in space-y-4">
+    <section className="rounded-xl border border-warning/25 bg-warning-soft px-4 py-3 text-[12px] text-muted">
+      <strong className="text-warning">Use a harmless test window and stop any active share first.</strong>{" "}
+      Place the test window where it is visible, save a Surface rule for it, then capture with protection off and on. Move OmniScreenVeil out of the test window’s way. Compare the two real captures below. They stay in this page and are not saved or uploaded.
+      This tests the Veil Surface, not OBS, Zoom, or another app’s capture path.
+    </section>
+    <div className="flex flex-wrap items-center gap-2">
+      <fieldset disabled={capturing}><DisplayPicker displays={displays} value={display} onChange={(value) => { setDisplay(value); setFrames({}); }} /></fieldset>
+      <Button onClick={() => void capture()} disabled={!live || capturing} title="Take a real Surface snapshot with the current protection state">
+        {capturing ? "Capturing…" : armed ? "Capture with protection on" : "Capture with protection off"}
+      </Button>
+      <Button variant="ghost" disabled={capturing || (!frames.off && !frames.on)} onClick={() => setFrames({})} title="Discard both captures">Clear captures</Button>
     </div>
-  );
+    {!live && <p className="text-xs text-muted">A live desktop backend is required. No simulated result is shown.</p>}
+    {error && <p role="alert" className="text-sm text-danger">{error}</p>}
+    <div className="grid gap-3 lg:grid-cols-2">
+      {([ ["Protection off", frames.off], ["Protection on", frames.on] ] as const).map(([label, frame]) => <section key={label} className="overflow-hidden rounded-xl border border-border bg-panel">
+        <h3 className="px-3 py-2 text-sm font-medium">{label}</h3>
+        {frame ? <><img className="w-full bg-black" src={`data:image/png;base64,${frame.png_base64}`} alt={`Live capture: ${label}`} /><p className="px-3 py-2 text-xs text-muted">{frame.masked} masked · {frame.source}</p></> : <p className="px-3 py-8 text-center text-xs text-muted">Not captured yet</p>}
+      </section>)}
+    </div>
+  </div>;
 }
 
 /* ------------------------------ Rules ------------------------------------ */
@@ -220,14 +182,22 @@ function appLabel(value: string) {
 
 export function RulesPage({
   profile,
+  windows,
+  automationPaused,
+  caps,
   busy,
+  onAdd,
   onAutoArm,
   onToggleRule,
   onRemoveRule,
   onClear,
 }: {
   profile: Profile | null;
+  windows: WindowInfo[];
+  automationPaused: boolean;
+  caps: Capabilities | null;
   busy: boolean;
+  onAdd: (app: AppKey, mode: ProtectionMode, enabled: boolean) => void;
   onAutoArm: (v: AutoArm) => void;
   onToggleRule: (id: number, enabled: boolean) => void;
   onRemoveRule: (id: number) => void;
@@ -235,6 +205,19 @@ export function RulesPage({
 }) {
   const rules = profile?.rules ?? [];
   const active = profile?.auto_arm ?? "off";
+  const apps = [...new Map(windows.map((w) => [w.app.value.toLowerCase(), w])).values()].sort((a, b) => a.app_name.localeCompare(b.app_name));
+  const [selection, setSelection] = useState("");
+  const [identity, setIdentity] = useState("");
+  const [mode, setMode] = useState<ProtectionMode>("surface");
+  const [enabled, setEnabled] = useState(true);
+  const platform = caps?.platform;
+  const kind = platform === "windows" ? "windows_executable" : platform === "mac_os" ? "mac_bundle" : "linux_app_id";
+  const hint = kind === "windows_executable" ? "Full executable path" : kind === "mac_bundle" ? "Bundle ID or .app path" : "Application ID or WM_CLASS";
+  const examples = kind === "windows_executable" ? ["C:\\Apps\\Example\\Example.exe", "C:\\Apps\\Demo\\Demo.exe"] : kind === "mac_bundle" ? ["com.apple.TextEdit", "com.apple.calculator"] : ["org.gnome.Calculator", "org.gnome.TextEditor"];
+  const field = "w-full rounded-md border border-border bg-app px-2.5 py-1.5 text-[12px] text-text";
+  const chosenApp = apps.find((w) => w.app.value === selection)?.app;
+  const manualApp: AppKey = { kind, value: identity.trim() };
+  const hasApp = (app: AppKey) => rules.some((r) => r.target.kind === "app" && r.target.value.kind === app.kind && r.target.value.value.replaceAll("\\", "/").toLowerCase() === app.value.replaceAll("\\", "/").toLowerCase());
 
   return (
     <div className="animate-page-in space-y-4">
@@ -254,6 +237,8 @@ export function RulesPage({
               type="button"
               disabled={busy}
               onClick={() => onAutoArm(m.id)}
+              aria-pressed={active === m.id}
+              title={m.hint}
               className={cn(
                 "rounded-lg border px-3 py-2.5 text-left transition-all disabled:opacity-50",
                 active === m.id
@@ -269,9 +254,35 @@ export function RulesPage({
           ))}
         </div>
         <p className="mt-2 text-[11px] text-faint">
-          A running capture app is a hint, never proof of an active share. Release all switches auto-arm off.
+          {automationPaused ? "Automation is paused for this session. Arm protection to resume it." : "A running capture app is a hint, not proof of a live share. Disarming pauses auto-arm without changing this policy."}
         </p>
       </div>
+
+      <form className="space-y-3 rounded-xl border border-border bg-panel p-4" onSubmit={(e) => {
+        e.preventDefault();
+        if (chosenApp || (!selection && manualApp.value)) onAdd(chosenApp ?? manualApp, mode, enabled);
+      }}>
+        <div><h3 className="text-[13px] font-semibold">Add an app rule</h3><p className="text-[11px] text-muted">App rules follow all of an app’s windows. Saving a rule for the same app replaces its current rule.</p></div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="space-y-1 text-xs">Application<select className={field} value={selection} onChange={(e) => setSelection(e.target.value)}>
+            <option value="">Enter an app manually</option>
+            {apps.map((w) => <option value={w.app.value} key={w.app.value}>{w.app_name} · {w.app.value}</option>)}
+          </select></label>
+          {!selection && <label className="space-y-1 text-xs">{hint}<input required className={field} value={identity} onChange={(e) => setIdentity(e.target.value)} placeholder={examples[0]} /></label>}
+          <label className="space-y-1 text-xs">Protection mode<select className={field} value={mode} onChange={(e) => setMode(e.target.value as ProtectionMode)}>
+            {MODES.map((item) => <option key={item.id} value={item.id} disabled={caps?.modes[item.id].level === "unsupported"}>{item.label}</option>)}
+          </select></label>
+        </div>
+        <p className="text-xs text-muted">{MODES.find((item) => item.id === mode)?.blurb}</p>
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-2 text-xs"><Switch checked={enabled} onCheckedChange={setEnabled} aria-label="Enable this rule" />Enabled</label>
+          <Button type="submit" disabled={busy || !profile || !caps || (!chosenApp && (Boolean(selection) || !manualApp.value)) || caps.modes[mode].level === "unsupported"} title="Save the rule without changing whether protection is armed">Save rule</Button>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
+          Disabled examples:
+          {examples.map((value) => <Button key={value} type="button" size="sm" variant="secondary" disabled={busy || !profile || !caps || caps.modes.surface.level === "unsupported" || hasApp({ kind, value })} title={`Add ${value} as a disabled Surface rule`} onClick={() => onAdd({ kind, value }, "surface", false)}>{appLabel(value)}</Button>)}
+        </div>
+      </form>
 
       <div className="overflow-hidden rounded-xl border border-border bg-panel">
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
@@ -322,10 +333,13 @@ export function RulesPage({
                   disabled={busy}
                   onCheckedChange={(v) => onToggleRule(rule.id, v)}
                   aria-label={`Enable rule ${rule.id}`}
+                  title={rule.enabled ? "Disable this rule without deleting it" : "Enable this rule"}
                 />
                 <button
                   type="button"
                   onClick={() => onRemoveRule(rule.id)}
+                  title="Remove this saved rule"
+                  aria-label={`Remove rule ${rule.id}`}
                   disabled={busy}
                   className="text-faint transition-colors hover:text-danger"
                 >

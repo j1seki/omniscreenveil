@@ -54,12 +54,17 @@ impl MacBackend {
     /// Live window inventory from `CGWindowListCopyWindowInfo`, with bundle
     /// identifiers so rules survive restarts and `open`-style launches.
     pub fn list_windows(&self) -> Result<Vec<veil_core::WindowInfo>, MacError> {
+        self.inventory(false)
+    }
+
+    pub fn inventory(&self, icons: bool) -> Result<Vec<veil_core::WindowInfo>, MacError> {
         #[cfg(target_os = "macos")]
         {
-            self.inner.list_windows()
+            self.inner.list_windows(icons)
         }
         #[cfg(not(target_os = "macos"))]
         {
+            let _ = icons;
             Err(MacError::NotMacOs)
         }
     }
@@ -103,6 +108,20 @@ impl MacBackend {
         &self,
         excluded: &BTreeSet<WindowId>,
     ) -> Result<veil_surface::Frame, MacError> {
+        self.capture_display(0, excluded, 0)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn displays(&self) -> Result<Vec<Display>, MacError> {
+        self.inner.displays()
+    }
+
+    pub fn capture_display(
+        &self,
+        display: u32,
+        excluded: &BTreeSet<WindowId>,
+        max_edge: u32,
+    ) -> Result<veil_surface::Frame, MacError> {
         #[cfg(target_os = "macos")]
         {
             let ids = excluded
@@ -110,14 +129,22 @@ impl MacBackend {
                 .map(|id| u32::try_from(id.0))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|err| MacError::Helper(format!("invalid window ID: {err}")))?;
-            self.inner.capture_display(0, &ids)
+            self.inner.capture_display(display, &ids, max_edge)
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = excluded;
+            let _ = (display, excluded, max_edge);
             Err(MacError::NotMacOs)
         }
     }
+}
+
+#[derive(serde::Deserialize)]
+pub struct Display {
+    pub id: u32,
+    pub name: String,
+    #[serde(flatten)]
+    pub bounds: veil_core::Rect,
 }
 
 impl ProtectionBackend for MacBackend {
@@ -196,7 +223,8 @@ mod ffi {
         fn veil_macos_show_window(window: u64) -> i32;
         fn veil_macos_last_error() -> *mut c_char;
         fn veil_macos_free_string(ptr: *mut c_char);
-        fn veil_macos_list_windows_json() -> *mut c_char;
+        fn veil_macos_list_windows_json(include_icons: i32) -> *mut c_char;
+        fn veil_macos_list_displays_json() -> *mut c_char;
         fn veil_macos_accessibility_trusted() -> i32;
         fn veil_macos_request_accessibility() -> i32;
         fn veil_macos_screen_recording_granted() -> i32;
@@ -205,6 +233,7 @@ mod ffi {
             display_id: u32,
             excluded_ids: *const u32,
             excluded_count: usize,
+            max_edge: u32,
             out_width: *mut u32,
             out_height: *mut u32,
         ) -> *mut u8;
@@ -237,6 +266,8 @@ mod ffi {
         height: u32,
         on_screen: bool,
         layer: i32,
+        #[serde(default)]
+        icon: String,
     }
 
     pub struct Helper;
@@ -269,6 +300,7 @@ mod ffi {
             &self,
             display_id: u32,
             excluded: &[u32],
+            max_edge: u32,
         ) -> Result<veil_surface::Frame, MacError> {
             let mut width: u32 = 0;
             let mut height: u32 = 0;
@@ -277,6 +309,7 @@ mod ffi {
                     display_id,
                     excluded.as_ptr(),
                     excluded.len(),
+                    max_edge,
                     &mut width,
                     &mut height,
                 )
@@ -291,15 +324,14 @@ mod ffi {
                 .map_err(|err| MacError::Helper(format!("bad ScreenCaptureKit frame: {err}")))
         }
 
-        pub fn list_windows(&self) -> Result<Vec<WindowInfo>, MacError> {
-            let ptr = unsafe { veil_macos_list_windows_json() };
-            if ptr.is_null() {
-                return Err(MacError::Helper(last_error()));
-            }
-            let text = unsafe { CStr::from_ptr(ptr) }
-                .to_string_lossy()
-                .into_owned();
-            unsafe { veil_macos_free_string(ptr) };
+        pub fn displays(&self) -> Result<Vec<super::Display>, MacError> {
+            let text = json_string(unsafe { veil_macos_list_displays_json() })?;
+            serde_json::from_str(&text).map_err(|err| MacError::Helper(err.to_string()))
+        }
+
+        pub fn list_windows(&self, icons: bool) -> Result<Vec<WindowInfo>, MacError> {
+            let ptr = unsafe { veil_macos_list_windows_json(i32::from(icons)) };
+            let text = json_string(ptr)?;
             let raw: Vec<RawWindow> = serde_json::from_str(&text)
                 .map_err(|err| MacError::Helper(format!("bad inventory JSON: {err}")))?;
             Ok(raw
@@ -321,10 +353,21 @@ mod ffi {
                     minimized: !window.on_screen,
                     top_level: true,
                     platform: Platform::MacOs,
-                    icon: String::new(),
+                    icon: window.icon,
                 })
                 .collect())
         }
+    }
+
+    fn json_string(ptr: *mut c_char) -> Result<String, MacError> {
+        if ptr.is_null() {
+            return Err(MacError::Helper(last_error()));
+        }
+        let text = unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { veil_macos_free_string(ptr) };
+        Ok(text)
     }
 
     fn last_error() -> String {

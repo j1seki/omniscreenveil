@@ -2,7 +2,7 @@
 
 Selective screen-capture privacy for Windows, macOS and Linux.
 
-![OmniScreenVeil dark-mode walkthrough: overview, window rules, armed protection, Surface preview, and canary audit](docs/images/app-dark-demo.gif)
+![Earlier OmniScreenVeil dark-mode walkthrough](docs/images/app-dark-demo.gif)
 
 Pick which windows you want to keep out of a share, then open and share the
 dedicated **OmniScreenVeil Surface** window. The original windows stay usable
@@ -240,8 +240,8 @@ user selected, and is unloaded best-effort on release.
 There is no public API for one application to remove another application's
 window from another capture client's stream, so system-wide **Exclusion** is
 reported unsupported. The Veil Surface uses ScreenCaptureKit to filter out
-selected windows and OmniScreenVeil's own windows from its **main-display
-capture** before any pixels reach the preview. It does not change what Zoom,
+selected windows and OmniScreenVeil's own windows from each selected display
+before any pixels reach the preview. It does not change what Zoom,
 OBS, or a full-desktop share sees when they capture your desktop directly.
 Strict hide uses the Accessibility `AXMinimized` attribute with your consent.
 
@@ -263,9 +263,18 @@ compositor it falls back to a root capture and masks its own windows. Strict
 hide unmaps the window and restores it. All of these paths are proven in
 `crates/veil-protect-linux/tests/x11_end_to_end.rs`.
 
-The desktop app also provides an **Open window** action (and tray entry) that
-opens a dedicated, chrome-free `OmniScreenVeil Surface` window — that second
-window is what you select in Discord, Zoom, OBS or a browser share dialog.
+The desktop app provides an **Open Surface** action (and tray entry). Share
+that dedicated window rather than your desktop. Hover along its top edge to
+select all displays or one display, refresh, or close it. Settings offers
+periodic snapshots, up to five reduced-size frames per second (capture speed
+permitting), and manual refresh. This is not a native video stream. Surface
+capture pauses when its window is minimized.
+
+To demonstrate or verify, stop any active share, choose a harmless test app,
+and set a Surface rule. Use **Capture test** to take real before/after frames
+with the main **Arm / Disarm** control. Disarming keeps saved rules and pauses
+automation for the current session; you can re-arm without rebuilding rules.
+The comparison tests this app's output only, not another client's capture path.
 
 On backends that mask by window position, the desktop app compares protected
 window bounds before and after capture. If they differ, the Surface drops the

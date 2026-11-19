@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Capabilities granted to the OmniScreenVeil windows.",
   "windows": ["main", "surface"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "core:window:allow-is-minimized"]
 }

@@ -15,7 +15,6 @@ import {
 } from "lucide-react";
 import type { BackendInfo, Theme } from "../types";
 import { cn } from "../lib/utils";
-import { ShieldMark } from "./icons";
 
 export type Page =
   | "overview"
@@ -24,6 +23,7 @@ export type Page =
   | "audit"
   | "rules"
   | "capabilities"
+  | "settings"
   | "updates";
 
 const NAV: {
@@ -36,10 +36,11 @@ const NAV: {
   { id: "overview", label: "Overview", icon: LayoutDashboard, group: "Workspace", keys: "1" },
   { id: "windows", label: "Windows", icon: ListFilter, group: "Workspace", keys: "2" },
   { id: "surface", label: "Surface", icon: PanelsTopLeft, group: "Workspace", keys: "3" },
-  { id: "audit", label: "Canary audit", icon: ScanSearch, group: "Verify", keys: "4" },
+  { id: "audit", label: "Capture test", icon: ScanSearch, group: "Verify", keys: "4" },
   { id: "rules", label: "Rules & automation", icon: Waypoints, group: "Verify", keys: "5" },
   { id: "capabilities", label: "Capabilities", icon: Settings2, group: "Verify", keys: "6" },
   { id: "updates", label: "Updates", icon: Download, group: "System", keys: "7" },
+  { id: "settings", label: "Settings", icon: Settings2, group: "System", keys: "8" },
 ];
 
 function NavItem({
@@ -98,7 +99,6 @@ export function Sidebar({
   version,
   updateAvailable,
   onToggleArm,
-  onOpenSurface,
 }: {
   page: Page;
   onNavigate: (page: Page) => void;
@@ -111,7 +111,6 @@ export function Sidebar({
   version: string;
   updateAvailable: boolean;
   onToggleArm: () => void;
-  onOpenSurface: () => void;
 }) {
   const live = backend?.live ?? false;
   let lastGroup = "";
@@ -121,7 +120,7 @@ export function Sidebar({
       {/* App identity */}
       <div className="flex h-14 items-center gap-2.5 px-4">
         <div className="flex size-7 items-center justify-center rounded-lg border border-border-strong bg-elevated shadow-sm">
-          <ShieldMark size={16} className="text-accent" />
+          <img src="/veil-mark.svg" alt="" className="size-6" />
         </div>
         <div className="min-w-0 flex-1">
           <p className="truncate text-[13px] font-semibold tracking-tight text-text">
@@ -205,6 +204,8 @@ export function Sidebar({
           <button
             type="button"
             onClick={onToggleArm}
+            title={armed ? "Pause protection and automation; keep saved rules" : "Turn on protection and apply saved rules"}
+            aria-pressed={armed}
             className={cn(
               "mt-2.5 h-8 w-full rounded-md text-[12px] font-medium transition-all",
               armed
@@ -217,14 +218,6 @@ export function Sidebar({
         </div>
 
         <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={onOpenSurface}
-            className="flex h-7 flex-1 items-center justify-center gap-1.5 rounded-md text-[11px] text-muted transition-colors hover:bg-hover hover:text-text"
-          >
-            <PanelsTopLeft className="size-3.5" />
-            Surface
-          </button>
           <button
             type="button"
             onClick={onOpenPalette}

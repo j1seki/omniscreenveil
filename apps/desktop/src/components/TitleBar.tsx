@@ -11,10 +11,11 @@ const TITLES: Record<Page, { title: string; subtitle: string }> = {
   overview: { title: "Overview", subtitle: "Your capture privacy at a glance" },
   windows: { title: "Windows", subtitle: "Choose which windows are protected and how" },
   surface: { title: "Veil Surface", subtitle: "The shareable, filtered view of your desktop" },
-  audit: { title: "Canary audit", subtitle: "Synthetic pixel self-test of the veil compositor" },
+  audit: { title: "Capture test", subtitle: "Compare real Surface captures" },
   rules: { title: "Rules & automation", subtitle: "Persistent protection policies and auto-arm" },
   capabilities: { title: "Capabilities", subtitle: "What each operating system can actually do" },
   updates: { title: "Updates", subtitle: "Stable and beta release channels" },
+  settings: { title: "Settings", subtitle: "Startup, window behavior, and preview preferences" },
 };
 
 export function TitleBar({
@@ -58,6 +59,7 @@ export function TitleBar({
         <button
           type="button"
           onClick={onOpenPalette}
+          title={`Search commands (${MOD}K)`}
           className="hidden h-8 items-center gap-2 rounded-md border border-border bg-panel px-2.5 text-[12px] text-faint transition-colors hover:border-border-strong hover:text-muted md:flex"
         >
           <Command className="size-3.5" />
@@ -77,7 +79,8 @@ export function TitleBar({
           size="icon"
           onClick={onRefresh}
           disabled={busy}
-          title="Refresh (⌘R)"
+          title={`Refresh window inventory (${MOD}R)`}
+          aria-label="Refresh window inventory"
           className="size-8"
         >
           <RefreshCw className={cn("size-3.5", busy && "animate-spin")} />
@@ -87,6 +90,8 @@ export function TitleBar({
           variant="secondary"
           size="sm"
           onClick={onOpenSurface}
+          title="Open a separate window to share instead of your desktop"
+          aria-label="Open Surface"
           className="h-8 gap-1.5 text-[12px]"
         >
           <Sparkles className="size-3.5 text-info" />
@@ -96,6 +101,8 @@ export function TitleBar({
         <Button
           size="sm"
           onClick={onToggleArm}
+          title={armed ? "Pause protection and automation; keep saved rules" : "Apply enabled protection rules"}
+          aria-pressed={armed}
           disabled={busy}
           className={cn(
             "h-8 gap-1.5 text-[12px]",

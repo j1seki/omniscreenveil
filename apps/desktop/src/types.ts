@@ -120,6 +120,7 @@ export interface Inventory {
   applied: AppliedProtection[];
   armed?: boolean;
   capture_active?: boolean;
+  automation_paused?: boolean;
   mac_permissions?: MacPermissions | null;
 }
 
@@ -134,6 +135,7 @@ export interface TickReport {
 }
 
 export interface SurfacePreview {
+  armed?: boolean;
   png_base64: string;
   width: number;
   height: number;
@@ -141,27 +143,15 @@ export interface SurfacePreview {
   source: string;
 }
 
-export interface Detection {
-  found: boolean;
-  confidence: number;
-  origin: { x: number; y: number } | null;
-  matched: number;
+export interface Display {
+  id: string;
+  name: string;
+  bounds: Rect;
 }
 
-export interface VerificationRecord {
-  path: string;
-  outcome: "protected" | "visible" | "inconclusive";
-  checked_at_unix: number;
-  os_build: string;
-  detail: string;
-}
-
-export interface VerificationRun {
-  path: string;
-  baseline: Detection;
-  after: Detection;
-  outcome: "protected" | "visible" | "inconclusive";
-  record: VerificationRecord;
+export interface DesktopPreferences {
+  close_behavior: "quit" | "minimize";
+  preview_mode: "economy" | "motion" | "manual";
 }
 
 export const MODES: {

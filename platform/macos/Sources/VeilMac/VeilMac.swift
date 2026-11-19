@@ -33,6 +33,16 @@ public struct VeilWindow: Codable {
     public let height: Int
     public let onScreen: Bool
     public let layer: Int
+    public let icon: String
+}
+
+struct VeilDisplay: Codable {
+    let id: UInt32
+    let name: String
+    let x: Int
+    let y: Int
+    let w: Int
+    let h: Int
 }
 
 public enum VeilMacError: LocalizedError {
@@ -81,7 +91,8 @@ public enum VeilMac {
     /// an empty title is normal and must not be treated as an error.
     public static func listWindows(
         includeOffscreen: Bool = false,
-        includeTiny: Bool = false
+        includeTiny: Bool = false,
+        includeIcons: Bool = false
     ) -> [VeilWindow] {
         let options: CGWindowListOption = includeOffscreen
             ? [.optionAll, .excludeDesktopElements]
@@ -94,6 +105,8 @@ public enum VeilMac {
         }
         let ownPid = ProcessInfo.processInfo.processIdentifier
         var out: [VeilWindow] = []
+        var applications: [Int32: NSRunningApplication] = [:]
+        var icons: [Int32: String] = [:]
         for entry in raw {
             guard
                 let number = entry[kCGWindowNumber as String] as? NSNumber,
@@ -111,9 +124,14 @@ public enum VeilMac {
             if layer.intValue != 0 { continue }
             if !includeTiny && (rect.width < 32 || rect.height < 32) { continue }
             let app = entry[kCGWindowOwnerName as String] as? String ?? "pid:\(pid)"
-            let bundle = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? ""
+            let running = applications[pid] ?? NSRunningApplication(processIdentifier: pid)
+            applications[pid] = running
+            let bundle = running?.bundleIdentifier ?? running?.bundleURL?.path ?? ""
             let title = entry[kCGWindowName as String] as? String ?? ""
             let onScreen = (entry[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue ?? false
+            if includeIcons && icons[pid] == nil {
+                icons[pid] = appIcon(running?.icon)
+            }
             out.append(
                 VeilWindow(
                     id: number.uint32Value,
@@ -126,11 +144,38 @@ public enum VeilMac {
                     width: Int(rect.width.rounded()),
                     height: Int(rect.height.rounded()),
                     onScreen: onScreen,
-                    layer: layer.intValue
+                    layer: layer.intValue,
+                    icon: icons[pid] ?? ""
                 )
             )
         }
         return out.sorted { $0.id < $1.id }
+    }
+
+    private static func appIcon(_ image: NSImage?) -> String {
+        guard let image, let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+              let ctx = CGContext(data: nil, width: 32, height: 32, bitsPerComponent: 8,
+                                  bytesPerRow: 128, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return "" }
+        ctx.interpolationQuality = .high
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: 32, height: 32))
+        guard let scaled = ctx.makeImage() else { return "" }
+        return NSBitmapImageRep(cgImage: scaled).representation(using: .png, properties: [:])?
+            .base64EncodedString() ?? ""
+    }
+
+    static func displays() -> [VeilDisplay] {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
+        let capacity = count
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(capacity))
+        guard CGGetActiveDisplayList(capacity, &ids, &count) == .success else { return [] }
+        return ids.prefix(Int(count)).enumerated().map { index, id in
+            let rect = CGDisplayBounds(id)
+            return VeilDisplay(id: id, name: "Display \(index + 1)" + (id == CGMainDisplayID() ? " (main)" : ""),
+                               x: Int(rect.minX), y: Int(rect.minY), w: Int(rect.width), h: Int(rect.height))
+        }
     }
 
     /// Minimal Accessibility tree walk to find the AXUIElement that owns a
@@ -246,6 +291,7 @@ public enum VeilMac {
     public static func captureDisplay(
         displayID: CGDirectDisplayID,
         excludingWindowIDs: Set<UInt32> = [],
+        maxEdge: Int = 0,
         completion: @escaping (Result<(Data, Int, Int), Error>) -> Void
     ) {
         Task {
@@ -275,8 +321,9 @@ public enum VeilMac {
                     }
                 )
                 let config = SCStreamConfiguration()
-                config.width = display.width
-                config.height = display.height
+                let ratio = maxEdge > 0 ? min(1.0, Double(maxEdge) / Double(max(display.width, display.height))) : 1.0
+                config.width = max(1, Int(Double(display.width) * ratio))
+                config.height = max(1, Int(Double(display.height) * ratio))
                 config.pixelFormat = kCVPixelFormatType_32BGRA
                 config.showsCursor = true
 

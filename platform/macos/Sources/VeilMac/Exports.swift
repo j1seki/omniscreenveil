@@ -89,6 +89,7 @@ public func veilMacosCaptureDisplay(
     _ displayID: UInt32,
     _ excludedIDs: UnsafePointer<UInt32>?,
     _ excludedCount: Int,
+    _ maxEdge: UInt32,
     _ outWidth: UnsafeMutablePointer<UInt32>?,
     _ outHeight: UnsafeMutablePointer<UInt32>?
 ) -> UnsafeMutablePointer<UInt8>? {
@@ -97,7 +98,7 @@ public func veilMacosCaptureDisplay(
     let excluded = Set(UnsafeBufferPointer(start: excludedIDs, count: excludedCount))
     let semaphore = DispatchSemaphore(value: 0)
     var result: Result<(Data, Int, Int), Error>?
-    VeilMac.captureDisplay(displayID: CGDirectDisplayID(displayID), excludingWindowIDs: excluded) { outcome in
+    VeilMac.captureDisplay(displayID: CGDirectDisplayID(displayID), excludingWindowIDs: excluded, maxEdge: Int(maxEdge)) { outcome in
         result = outcome
         semaphore.signal()
     }
@@ -131,16 +132,23 @@ public func veilMacosFreeBuffer(_ pointer: UnsafeMutablePointer<UInt8>?) {
 /// Inventory as JSON, consumed by `veil-protect-macos`. Returns a malloc'd
 /// UTF-8 string owned by the caller (`veil_macos_free_string`).
 @_cdecl("veil_macos_list_windows_json")
-public func veilMacosListWindowsJson() -> UnsafeMutablePointer<CChar>? {
+public func veilMacosListWindowsJson(_ includeIcons: Int32) -> UnsafeMutablePointer<CChar>? {
     // Include off-screen windows: strict hide minimizes windows, and dropping
     // them from the inventory would make the engine think they vanished and
     // immediately re-plan them (flicker).
-    let windows = VeilMac.listWindows(includeOffscreen: true)
+    let windows = VeilMac.listWindows(includeOffscreen: true, includeTiny: true, includeIcons: includeIcons != 0)
     let encoder = JSONEncoder()
     guard let data = try? encoder.encode(windows),
         let text = String(data: data, encoding: .utf8)
     else {
         return strdup("[]")
     }
+    return strdup(text)
+}
+
+@_cdecl("veil_macos_list_displays_json")
+public func veilMacosListDisplaysJson() -> UnsafeMutablePointer<CChar>? {
+    guard let data = try? JSONEncoder().encode(VeilMac.displays()),
+          let text = String(data: data, encoding: .utf8) else { return nil }
     return strdup(text)
 }

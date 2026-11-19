@@ -173,13 +173,81 @@ impl WaylandBackend {
 
     /// Capture all outputs through wlr-screencopy.
     pub fn capture_root(&self) -> Result<Frame, WaylandError> {
-        let raw = run("grim", &["-t", "ppm", "-"]).map_err(|err| match err {
+        self.capture_region(None)
+    }
+
+    /// Capture a region in global logical coordinates at logical pixel scale.
+    pub fn capture_region(&self, region: Option<Rect>) -> Result<Frame, WaylandError> {
+        let geometry;
+        let mut args = vec!["-s", "1", "-t", "ppm"];
+        if let Some(rect) = region {
+            geometry = format!("{},{} {}x{}", rect.x, rect.y, rect.w, rect.h);
+            args.extend(["-g", &geometry]);
+        }
+        args.push("-");
+        let raw = run("grim", &args).map_err(|err| match err {
             WaylandError::Command(message) => WaylandError::Capture(format!(
                 "{message} (install `grim` and ensure it can reach the compositor)"
             )),
             other => other,
         })?;
         parse_ppm(&raw)
+    }
+
+    pub fn outputs(&self) -> Result<Vec<(String, Rect)>, WaylandError> {
+        let raw = match self.compositor {
+            Compositor::Sway => run("swaymsg", &["-t", "get_outputs", "-r"]),
+            Compositor::Hyprland => run("hyprctl", &["monitors", "-j"]),
+        }?;
+        let outputs: Vec<serde_json::Value> =
+            serde_json::from_slice(&raw).map_err(|err| WaylandError::Parse(err.to_string()))?;
+        outputs
+            .iter()
+            .filter(|item| item["active"].as_bool() != Some(false))
+            .map(|item| {
+                let invalid = || WaylandError::Parse("invalid output geometry".into());
+                let name = item["name"].as_str().ok_or_else(invalid)?.to_owned();
+                let g = if self.compositor == Compositor::Sway {
+                    &item["rect"]
+                } else {
+                    item
+                };
+                let x = g["x"]
+                    .as_i64()
+                    .and_then(|n| i32::try_from(n).ok())
+                    .ok_or_else(invalid)?;
+                let y = g["y"]
+                    .as_i64()
+                    .and_then(|n| i32::try_from(n).ok())
+                    .ok_or_else(invalid)?;
+                let w = g["width"]
+                    .as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .ok_or_else(invalid)?;
+                let h = g["height"]
+                    .as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .ok_or_else(invalid)?;
+                let (w, h) = if self.compositor == Compositor::Hyprland {
+                    let scale = item["scale"]
+                        .as_f64()
+                        .filter(|n| *n > 0.0)
+                        .ok_or_else(invalid)?;
+                    let (w, h) = if item["transform"].as_u64().unwrap_or(0) % 2 == 1 {
+                        (h, w)
+                    } else {
+                        (w, h)
+                    };
+                    (
+                        (w as f64 / scale).round() as u32,
+                        (h as f64 / scale).round() as u32,
+                    )
+                } else {
+                    (w, h)
+                };
+                Ok((name, Rect::new(x, y, w, h)))
+            })
+            .collect()
     }
 
     fn hide(&self, window: WindowId) -> Result<(), WaylandError> {

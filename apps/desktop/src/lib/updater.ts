@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import * as api from "../api";
 import type { UpdateChannel, UpdateInfo, UpdateProgress } from "../types";
 
@@ -93,7 +94,6 @@ export function useUpdater(notify: Notice) {
     if (!api.IN_TAURI) return;
     let unlisten: (() => void) | undefined;
     void (async () => {
-      const { listen } = await import("@tauri-apps/api/event");
       unlisten = await listen<UpdateProgress>("veil://update-progress", (event) => {
         setProgress(event.payload);
       });

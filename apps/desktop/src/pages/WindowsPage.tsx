@@ -16,7 +16,7 @@ import type {
   ProtectionMode,
   WindowInfo,
 } from "../types";
-import { MODES, findRuleForWindow, isCaptureWindow, modeLabel } from "../types";
+import { MODES, findRuleForWindow, isCaptureWindow, modeLabel, normalizeAppKey } from "../types";
 import { cn } from "../lib/utils";
 import { AppGlyph } from "../components/icons";
 import { SpatialRadar } from "../components/Visuals";
@@ -74,7 +74,11 @@ export function WindowsPage({
 }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
-  const [showRadar, setShowRadar] = useState(false);
+  const [showRadar, setShowRadar] = useState(true);
+  const [showUtility, setShowUtility] = useState(false);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const isMac = caps?.platform === "mac_os";
+  const isUtility = (w: WindowInfo) => w.platform === "mac_os" && !w.title.trim() && w.bounds.w <= 80 && w.bounds.h <= 80;
 
   const counts = useMemo(() => {
     let protectedCount = 0;
@@ -95,6 +99,7 @@ export function WindowsPage({
     const q = query.trim().toLowerCase();
     return inventory.windows
       .filter((w) => {
+        if (!showUtility && isUtility(w) && !findRuleForWindow(profile, w)) return false;
         if (filter === "protected" && !findRuleForWindow(profile, w)) return false;
         if (filter === "exposed" && findRuleForWindow(profile, w)) return false;
         if (filter === "capture" && !isCaptureWindow(w)) return false;
@@ -107,7 +112,15 @@ export function WindowsPage({
         );
       })
       .sort((a, b) => a.app_name.localeCompare(b.app_name) || a.title.localeCompare(b.title));
-  }, [inventory.windows, profile, filter, query]);
+  }, [inventory.windows, profile, filter, query, showUtility]);
+
+  const groups = new Map<string, WindowInfo[]>();
+  for (const row of rows) {
+    const key = isMac ? normalizeAppKey(row.app.value) : String(row.id);
+    const group = groups.get(key) ?? [];
+    group.push(row);
+    groups.set(key, group);
+  }
 
   return (
     <div className="animate-page-in space-y-4">
@@ -133,6 +146,7 @@ export function WindowsPage({
           <button
             type="button"
             onClick={onRefresh}
+            title="Refresh the list of running apps and windows"
             disabled={busy}
             className="h-8 rounded-md border border-border bg-panel px-2.5 text-[12px] text-muted transition-colors hover:border-border-strong hover:text-text disabled:opacity-50"
           >
@@ -141,6 +155,8 @@ export function WindowsPage({
           <button
             type="button"
             onClick={() => setShowRadar((v) => !v)}
+            title="Show or hide the desktop window layout"
+            aria-expanded={showRadar}
             className={cn(
               "inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-[12px] transition-colors",
               showRadar
@@ -156,11 +172,15 @@ export function WindowsPage({
 
       {showRadar && (
         <SpatialRadar
-          inventory={inventory}
+          inventory={{ ...inventory, windows: inventory.windows.filter((w) => showUtility || !isUtility(w) || Boolean(findRuleForWindow(profile, w))) }}
           profile={profile}
           onSelectWindow={onToggle}
         />
       )}
+      {isMac && <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
+        <span>Windows from the same app are grouped. App rules apply to every window in the group.</span>
+        <label className="flex items-center gap-2" title="Include small, untitled utility windows in the list"><input type="checkbox" checked={showUtility} onChange={(e) => setShowUtility(e.target.checked)} /> Show small untitled windows</label>
+      </div>}
 
       {/* Table */}
       <div className="overflow-hidden rounded-xl border border-border bg-panel">
@@ -225,14 +245,15 @@ export function WindowsPage({
               </p>
             </div>
           )}
-          {rows.map((win) => {
+          {[...groups].map(([key, windows]) => {
+            const win = windows.find((w) => w.visible) ?? windows[0];
             const rule = findRuleForWindow(profile, win);
             const enabled = Boolean(rule);
             const mode = rule?.mode ?? preferredMode(caps);
             const applied = inventory.applied.find((a) => a.window === win.id);
             return (
+              <div key={key}>
               <div
-                key={win.id}
                 className={cn(
                   "grid grid-cols-[minmax(0,1fr)_160px_100px_70px] items-center gap-3 px-4 py-2.5 transition-colors hover:bg-hover/50",
                   enabled && "bg-accent-soft/[0.25]",
@@ -250,9 +271,11 @@ export function WindowsPage({
                       )}
                     </div>
                     <div className="flex items-center gap-2 text-[11px] text-faint">
-                      <span className="truncate">{win.title || "Untitled window"}</span>
-                      <span className="shrink-0 font-mono">0x{win.id.toString(16)}</span>
-                      <span className="hidden shrink-0 lg:inline">{win.bounds.w}×{win.bounds.h}</span>
+                      {windows.length > 1 ? <button type="button" className="underline hover:text-accent" title="List the individual windows from this app" aria-expanded={expanded.has(key)} onClick={() => setExpanded((old) => { const next = new Set(old); if (!next.delete(key)) next.add(key); return next; })}>{windows.length} windows</button> : <>
+                        <span className="truncate">{win.title || "Untitled window"}</span>
+                        <span className="shrink-0 font-mono">0x{win.id.toString(16)}</span>
+                        <span className="hidden shrink-0 lg:inline">{win.bounds.w}×{win.bounds.h}</span>
+                      </>}
                     </div>
                   </div>
                 </div>
@@ -269,7 +292,7 @@ export function WindowsPage({
                           type="button"
                           disabled={busy || unsupported}
                           onClick={() => onMode(win, entry.id)}
-                          title={unsupported ? `${entry.label} is unsupported on this OS` : `Use ${entry.label}`}
+                          title={unsupported ? `${entry.label} is unsupported on this OS` : entry.blurb}
                           className={cn(
                             "h-6 rounded px-2 text-[10px] transition-all disabled:opacity-30",
                             active
@@ -303,9 +326,17 @@ export function WindowsPage({
                     checked={enabled}
                     disabled={busy}
                     aria-label={`Protect ${win.app_name}`}
+                    title={enabled ? "Remove the protection rule" : "Configure protection for this app; use Arm to apply it"}
                     onCheckedChange={() => onToggle(win)}
                   />
                 </div>
+              </div>
+              {windows.length > 1 && expanded.has(key) && <ul className="space-y-1 px-12 py-2 text-xs text-muted">
+                {windows.map((w) => <li key={w.id} className="flex flex-wrap items-center gap-2">
+                  <span>{w.title || "Untitled window"}</span><code className="text-faint">0x{w.id.toString(16)} · {w.bounds.w}×{w.bounds.h}</code>
+                  <StatusCell win={w} applied={inventory.applied.find((item) => item.window === w.id)} configured={Boolean(findRuleForWindow(profile, w))} />
+                </li>)}
+              </ul>}
               </div>
             );
           })}

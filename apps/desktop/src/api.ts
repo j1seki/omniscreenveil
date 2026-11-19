@@ -13,6 +13,8 @@ import type {
   AppliedProtection,
   AutoArm,
   Capabilities,
+  Display,
+  DesktopPreferences,
   InstallOutcome,
   Inventory,
   MacPermission,
@@ -25,7 +27,6 @@ import type {
   TickReport,
   UpdateChannel,
   UpdateCheck,
-  VerificationRun,
   WindowInfo,
 } from "./types";
 import { isCaptureWindow } from "./types";
@@ -49,6 +50,8 @@ const DEMO_COLORS = ["#3b5998", "#7c3f68", "#2d6e5e", "#7a6234"];
 let mockProfile: Profile = { version: 1, rules: [], surface: {}, auto_arm: "off" };
 let mockNextRule = 1;
 let mockExplicitArmed = false;
+let mockPaused = false;
+let mockPreferences: DesktopPreferences = { close_behavior: "quit", preview_mode: "economy" };
 
 function mockPlatform(): Platform {
   const agent = navigator.userAgent.toLowerCase();
@@ -132,6 +135,7 @@ function ruleMatchesWindow(rule: Rule, window: WindowInfo): boolean {
 }
 
 function mockShouldArm(windows: WindowInfo[]): boolean {
+  if (mockPaused) return false;
   if (mockProfile.auto_arm === "always") return true;
   if (mockProfile.auto_arm === "capture_app_running") {
     return mockExplicitArmed || windows.some(isCaptureWindow);
@@ -170,13 +174,14 @@ function mockInventory(): Inventory {
       note: "Browser preview: no OS APIs are called. Run `pnpm tauri dev` for the live backend.",
     },
     applied,
-    armed: mockShouldArm(windows) && applied.length > 0,
+    armed: mockShouldArm(windows),
     capture_active: windows.some(isCaptureWindow),
+    automation_paused: mockPaused,
   };
 }
 
-function mockTick(): TickReport {
-  mockExplicitArmed = true;
+function mockTick(arm = true): TickReport {
+  if (arm) { mockPaused = false; mockExplicitArmed = true; }
   const applied = mockApplied();
   return {
     applied,
@@ -231,24 +236,6 @@ function mockPreview(): SurfacePreview {
     height,
     masked,
     source: "simulated desktop (browser preview)",
-  };
-}
-
-function mockVerify(): VerificationRun {
-  const now = Math.floor(Date.now() / 1000);
-  return {
-    path: "synthetic",
-    baseline: { found: true, confidence: 1, origin: { x: 448, y: 238 }, matched: 64 },
-    after: { found: false, confidence: 0, origin: null, matched: 0 },
-    outcome: "protected",
-    record: {
-      path: "synthetic",
-      outcome: "protected",
-      checked_at_unix: now,
-      os_build: "browser-preview",
-      detail:
-        "Canary 8x8 token at 448,238 was present in baseline capture (64/64 cells) and absent after arming (0/64 cells).",
-    },
   };
 }
 
@@ -342,15 +329,16 @@ export async function setAutoArm(autoArm: AutoArm): Promise<Profile> {
 export async function addAppRule(
   app: AppKey,
   mode: ProtectionMode,
+  enabled = true,
 ): Promise<Profile> {
   if (!IN_TAURI) {
     mockProfile.rules = mockProfile.rules.filter(
       (rule) => !(rule.target.kind === "app" && normalizeApp(rule.target.value) === normalizeApp(app)),
     );
-    mockProfile.rules.push({ id: mockNextRule++, target: { kind: "app", value: app }, mode, enabled: true, note: "" });
+    mockProfile.rules.push({ id: mockNextRule++, target: { kind: "app", value: app }, mode, enabled, note: "" });
     return structuredClone(mockProfile);
   }
-  return invoke<Profile>("add_app_rule", { app, mode });
+  return invoke<Profile>("add_app_rule", { app, mode, enabled });
 }
 
 export async function addWindowRule(
@@ -444,24 +432,27 @@ export async function resetProfile(): Promise<Profile> {
   return invoke<Profile>("reset_profile");
 }
 
-export async function tick(): Promise<TickReport> {
-  if (!IN_TAURI) return mockTick();
-  return invoke<TickReport>("tick");
+export async function tick(arm = true): Promise<TickReport> {
+  if (!IN_TAURI) return mockTick(arm);
+  return invoke<TickReport>("tick", { arm });
 }
 
 export async function releaseAll(): Promise<{ released: number; failed: string[] }> {
   if (!IN_TAURI) {
     const released = mockApplied().length;
     mockExplicitArmed = false;
-    mockProfile.auto_arm = "off";
+    mockPaused = true;
     return { released, failed: [] };
   }
   return invoke<{ released: number; failed: string[] }>("release_all");
 }
 
-export async function preview(): Promise<SurfacePreview> {
-  if (!IN_TAURI) return mockPreview();
-  return invoke<SurfacePreview>("preview");
+export async function preview(monitor: string | null = null, motion = false, liveOnly = false): Promise<SurfacePreview> {
+  if (!IN_TAURI) {
+    if (liveOnly) throw new Error("Open the desktop app to test real capture.");
+    return mockPreview();
+  }
+  return invoke<SurfacePreview>("preview", { monitor, motion, liveOnly });
 }
 
 export async function openSurface(): Promise<void> {
@@ -476,9 +467,26 @@ export async function openSurface(): Promise<void> {
   return invoke<void>("open_surface");
 }
 
-export async function verify(): Promise<VerificationRun> {
-  if (!IN_TAURI) return mockVerify();
-  return invoke<VerificationRun>("verify");
+export async function closeSurface(): Promise<void> {
+  if (!IN_TAURI) { window.close(); return; }
+  return invoke("close_surface");
+}
+
+export async function surfaceDisplays(): Promise<Display[]> {
+  return IN_TAURI ? invoke("surface_displays") : [];
+}
+
+export async function getPreferences(): Promise<DesktopPreferences> {
+  return IN_TAURI ? invoke("get_preferences") : mockPreferences;
+}
+
+export async function savePreferences(preferences: DesktopPreferences): Promise<void> {
+  if (!IN_TAURI) { mockPreferences = preferences; return; }
+  return invoke("save_preferences", { preferences });
+}
+
+export async function loginStartup(enabled?: boolean): Promise<boolean> {
+  return IN_TAURI ? invoke("login_startup", { enabled }) : false;
 }
 
 // ---------------------------------------------------------------------------
