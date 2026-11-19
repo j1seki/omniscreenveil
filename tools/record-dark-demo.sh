@@ -46,21 +46,21 @@ frame() {
 frame 01-overview
 xdotool key ctrl+2
 frame 02-windows
+xdotool key ctrl+4
+sleep 0.4
+# Capture both states on the same page so navigating away doesn't discard them.
+xdotool mousemove --window "$window" 560 230 click 1 mousemove 1240 870
+sleep 1
 xdotool key ctrl+k
 sleep 0.3
 xdotool type 'protect all windows'
 xdotool key Return
+sleep 1
+xdotool mousemove --window "$window" 560 230 click 1 mousemove 1240 870
+frame 05-audit
 xdotool key ctrl+1
 frame 03-armed
 xdotool key ctrl+3
-sleep 0.3
-# Click Render preview in the fixed-size demo window.
-xdotool mousemove --window "$window" 925 137 click 1 mousemove 1240 870
 frame 04-surface
-xdotool key ctrl+k
-sleep 0.3
-xdotool type 'run canary audit'
-xdotool key Return
-frame 05-audit
 magick -delay 280 "$scratch"/0*.png -resize '1120x>' +dither -colors 128 -loop 0 -layers optimize "$output"
 magick identify -format '%s: %wx%h, %T centiseconds\n' "$output"

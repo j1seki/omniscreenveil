@@ -270,19 +270,28 @@ impl<B: ProtectionBackend> Engine<B> {
             // hide would stay in effect underneath a Surface mask, or an
             // exclusion would survive a switch to strict hide.
             if let Some(current) = self.applied.get(&intent.window).cloned() {
-                if current.status.is_applied() && current.mode != intent.mode {
+                if current.mode != intent.mode {
                     match self.backend.release(intent.window) {
                         Ok(()) => {
                             self.applied.remove(&intent.window);
                             self.events.push(Event::Released {
                                 window: intent.window,
                             });
+                            report.released.push(intent.window);
                         }
                         Err(err) => {
                             let reason = format!(
                                 "could not release {} before switching to {}: {err}",
                                 current.mode.label(),
                                 intent.mode.label()
+                            );
+                            self.applied.insert(
+                                intent.window,
+                                AppliedProtection::failed(
+                                    intent.window,
+                                    current.mode,
+                                    reason.clone(),
+                                ),
                             );
                             self.events.push(Event::Failed {
                                 window: intent.window,
@@ -559,15 +568,19 @@ mod tests {
         );
 
         engine.profile.rules[0].mode = ProtectionMode::Surface;
+        engine.backend.fail_on(WindowId(1));
+        let partial = engine.tick(&live());
+        assert_eq!(partial.failed.len(), 1);
+        assert_eq!(partial.applied.len(), 1);
+        assert!(!engine.applied_for(WindowId(1)).unwrap().status.is_applied());
+        engine.backend.heal(WindowId(1));
+        let calls_before_retry = engine.backend.calls.len();
         let report = engine.tick(&live());
-        assert_eq!(report.applied.len(), 2);
-        assert!(
-            engine
-                .backend
-                .calls
-                .iter()
-                .any(|call| call == "release:WindowId(1)"),
-            "previous mode should be released before Surface is applied"
+        assert_eq!(report.applied.len(), 1);
+        assert_eq!(report.released, vec![WindowId(1)]);
+        assert_eq!(
+            &engine.backend.calls[calls_before_retry..],
+            ["release:WindowId(1)", "apply:WindowId(1):Surface"],
         );
         assert_eq!(
             engine.backend.applied_modes().get(&WindowId(1)),

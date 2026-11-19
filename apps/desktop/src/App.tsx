@@ -281,9 +281,9 @@ export default function App() {
     try {
       const report = await api.releaseAll();
       await refresh("release", true);
-      setError(null);
-      notify(report.failed.length ? `Release failed: ${report.failed.join("; ")}` : `Protection off · automation paused · rules kept`,
-        report.failed.length ? "error" : "info");
+      const failure = report.failed.length ? `Release failed: ${report.failed.join(", ")}` : null;
+      setError(failure);
+      notify(failure ?? "Protection off · automation paused · rules kept", failure ? "error" : "info");
     } catch (err) {
       setError(String(err));
       notify(String(err), "error");
@@ -418,6 +418,7 @@ export default function App() {
                 {inv.backend.note}
               </BackendBanner>
             )}
+            {inv?.profile_error && <div className="mt-2"><BackendBanner tone="error" title="Profile unavailable">{inv.profile_error}</BackendBanner></div>}
             {error && <div className="mt-2"><BackendBanner tone="error" title="Command failed">{error}</BackendBanner></div>}
             {updater.update && page !== "updates" && (
               <div className="mt-2 flex items-center gap-2.5 rounded-lg border border-accent/25 bg-accent-soft px-3 py-2 text-[11px] leading-snug text-muted">

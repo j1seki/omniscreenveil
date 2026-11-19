@@ -29,7 +29,7 @@ export function BackendBanner({
           tone === "error" && "text-danger",
         )}
       />
-      <span className="min-w-0 flex-1 truncate">
+      <span className={cn("min-w-0 flex-1", tone === "error" ? "break-words" : "truncate")}>
         <strong
           className={cn(
             "font-semibold",

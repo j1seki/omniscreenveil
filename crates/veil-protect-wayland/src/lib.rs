@@ -114,22 +114,11 @@ impl WaylandBackend {
     /// Live top-level windows, with coordinates in the compositor's global
     /// logical layout.
     pub fn list_windows(&self) -> Result<Vec<WindowInfo>, WaylandError> {
-        let (windows, tracks) = match self.compositor {
-            Compositor::Sway => {
-                let raw = run("swaymsg", &["-t", "get_tree", "-r"])?;
-                let text = String::from_utf8_lossy(&raw);
-                let inventory = parse_sway_tree(&text, std::process::id())?;
-                (inventory.windows, inventory.tracks)
-            }
-            Compositor::Hyprland => {
-                let raw = run("hyprctl", &["clients", "-j"])?;
-                let text = String::from_utf8_lossy(&raw);
-                let inventory = parse_hyprland_clients(&text, std::process::id())?;
-                (inventory.windows, inventory.tracks)
-            }
-        };
-
+        let Inventory {
+            windows, tracks, ..
+        } = self.inventory()?;
         let mut stored = self.tracks.borrow_mut();
+        stored.retain(|id, _| tracks.contains_key(id));
         for (id, track) in tracks {
             stored
                 .entry(id)
@@ -147,28 +136,21 @@ impl WaylandBackend {
     /// Bounds of every window owned by this process, so the Veil Surface does
     /// not composite itself (main window or Surface window) into the shared
     /// frame.
-    pub fn own_windows(&self) -> Vec<Rect> {
-        let inventory = match self.compositor {
+    pub fn own_windows(&self) -> Result<Vec<Rect>, WaylandError> {
+        Ok(self.inventory()?.own_windows)
+    }
+
+    fn inventory(&self) -> Result<Inventory, WaylandError> {
+        match self.compositor {
             Compositor::Sway => {
-                let Ok(raw) = run("swaymsg", &["-t", "get_tree", "-r"]) else {
-                    return Vec::new();
-                };
-                match parse_sway_tree(&String::from_utf8_lossy(&raw), std::process::id()) {
-                    Ok(inventory) => inventory,
-                    Err(_) => return Vec::new(),
-                }
+                let raw = run("swaymsg", &["-t", "get_tree", "-r"])?;
+                parse_sway_tree(&String::from_utf8_lossy(&raw), std::process::id())
             }
             Compositor::Hyprland => {
-                let Ok(raw) = run("hyprctl", &["clients", "-j"]) else {
-                    return Vec::new();
-                };
-                match parse_hyprland_clients(&String::from_utf8_lossy(&raw), std::process::id()) {
-                    Ok(inventory) => inventory,
-                    Err(_) => return Vec::new(),
-                }
+                let raw = run("hyprctl", &["clients", "-j"])?;
+                parse_hyprland_clients(&String::from_utf8_lossy(&raw), std::process::id())
             }
-        };
-        inventory.own_windows
+        }
     }
 
     /// Capture all outputs through wlr-screencopy.
@@ -412,49 +394,39 @@ fn parse_sway_tree(json: &str, own_pid: u32) -> Result<Inventory, WaylandError> 
     let root: serde_json::Value =
         serde_json::from_str(json).map_err(|err| WaylandError::Parse(err.to_string()))?;
     let mut inventory = Inventory::default();
-    let mut workspace = None;
-    walk_sway(&root, &mut workspace, own_pid, &mut inventory);
+    walk_sway(&root, None, (0, 0), 1, own_pid, &mut inventory);
     inventory.windows.sort_by_key(|window| window.id);
     Ok(inventory)
 }
 
+fn sway_rect(value: &serde_json::Value) -> Rect {
+    Rect::new(
+        value["x"].as_i64().unwrap_or(0) as i32,
+        value["y"].as_i64().unwrap_or(0) as i32,
+        value["width"].as_u64().unwrap_or(0) as u32,
+        value["height"].as_u64().unwrap_or(0) as u32,
+    )
+}
+
 fn walk_sway(
     node: &serde_json::Value,
-    workspace: &mut Option<String>,
+    workspace: Option<&str>,
+    parent_origin: (i32, i32),
+    title_rows: i32,
     own_pid: u32,
     out: &mut Inventory,
 ) {
-    let rect = node.get("rect");
-    let rel_x = rect
-        .and_then(|value| value.get("x"))
-        .and_then(|value| value.as_i64())
-        .unwrap_or(0) as i32;
-    let rel_y = rect
-        .and_then(|value| value.get("y"))
-        .and_then(|value| value.as_i64())
-        .unwrap_or(0) as i32;
-    let width = rect
-        .and_then(|value| value.get("width"))
-        .and_then(|value| value.as_u64())
-        .unwrap_or(0);
-    let height = rect
-        .and_then(|value| value.get("height"))
-        .and_then(|value| value.as_u64())
-        .unwrap_or(0);
-    // sway IPC rects are already in global layout coordinates.
-    let x = rel_x;
-    let y = rel_y;
-
-    let node_type = node
-        .get("type")
-        .and_then(|value| value.as_str())
-        .unwrap_or("");
-    if node_type == "workspace" {
-        *workspace = node
-            .get("name")
-            .and_then(|value| value.as_str())
-            .map(str::to_string);
-    }
+    let rect = sway_rect(&node["rect"]);
+    // The view rect is global. Sway reports the title bar relative to its
+    // parent container or workspace, and excludes it from the view rect.
+    let decoration = sway_rect(&node["deco_rect"]).translated(parent_origin.0, parent_origin.1);
+    let container_origin = (rect.x, rect.y - decoration.h as i32 * title_rows);
+    let node_type = node["type"].as_str().unwrap_or("");
+    let workspace = if node_type == "workspace" {
+        node["name"].as_str()
+    } else {
+        workspace
+    };
 
     let pid = node
         .get("pid")
@@ -476,14 +448,11 @@ fn walk_sway(
         .unwrap_or("")
         .to_string();
 
-    let is_window = pid > 0
-        && !title.is_empty()
-        && matches!(node_type, "con" | "floating_con")
-        && width >= 32
-        && height >= 32;
+    let is_window =
+        pid > 0 && matches!(node_type, "con" | "floating_con") && rect.w >= 32 && rect.h >= 32;
 
     if is_window {
-        let bounds = Rect::new(x, y, width as u32, height as u32);
+        let bounds = rect.union(&decoration);
         if pid == own_pid {
             out.own_windows.push(bounds);
         } else if let Some(id) = node.get("id").and_then(|value| value.as_u64()) {
@@ -513,7 +482,7 @@ fn walk_sway(
             out.tracks.insert(
                 id,
                 Track {
-                    workspace: workspace.clone(),
+                    workspace: workspace.map(str::to_owned),
                     workspace_id: None,
                     hidden: false,
                 },
@@ -523,8 +492,13 @@ fn walk_sway(
 
     for key in ["nodes", "floating_nodes"] {
         if let Some(children) = node.get(key).and_then(|value| value.as_array()) {
+            let rows = if key == "nodes" && node["layout"].as_str() == Some("stacked") {
+                children.len() as i32
+            } else {
+                1
+            };
             for child in children {
-                walk_sway(child, workspace, own_pid, out);
+                walk_sway(child, workspace, container_origin, rows, own_pid, out);
             }
         }
     }
@@ -819,6 +793,28 @@ mod tests {
         let second = &inventory.windows[1];
         assert_eq!(second.app_name, "signal");
         assert!(!second.visible);
+    }
+
+    #[test]
+    fn sway_includes_title_bars_on_offset_outputs_and_for_own_windows() {
+        let json = serde_json::json!({
+            "type": "workspace", "name": "2",
+            "rect": {"x": -900, "y": 50, "width": 900, "height": 800},
+            "floating_nodes": [{
+                "type": "floating_con", "id": 88, "pid": 42, "app_id": "sample",
+                "rect": {"x": -880, "y": 100, "width": 320, "height": 200},
+                "deco_rect": {"x": 20, "y": 25, "width": 320, "height": 25}
+            }]
+        });
+        let bounds = Rect::new(-880, 75, 320, 225);
+        assert_eq!(
+            parse_sway_tree(&json.to_string(), 1).unwrap().windows[0].bounds,
+            bounds
+        );
+        assert_eq!(
+            parse_sway_tree(&json.to_string(), 42).unwrap().own_windows,
+            vec![bounds]
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { RefreshCw, X } from "lucide-react";
@@ -13,8 +13,14 @@ export default function Surface() {
   const [displays, setDisplays] = useState<Display[]>([]);
   const [monitor, setMonitor] = useState<string | null>(null);
   const [mode, setMode] = useState<DesktopPreferences["preview_mode"] | null>(null);
-  const [revision, refresh] = useState(0);
+  const [revision, setRevision] = useState(0);
+  const captureRevision = useRef(0);
   const inFlight = useRef<Promise<unknown> | null>(null);
+  const refresh = useCallback(() => {
+    setSrc(null);
+    setMessage("Waiting for the next frame…");
+    setRevision(++captureRevision.current);
+  }, []);
 
   useEffect(() => {
     if (mode === "native" && !monitor && displays.length === 1) setMonitor(displays[0].id);
@@ -24,17 +30,16 @@ export default function Surface() {
     let active = true;
     const cleanups: (() => void)[] = [];
     const updateDisplays = () => void api.surfaceDisplays().then((list) => { if (active) setDisplays(list); }, () => {});
-    const change = () => { setSrc(null); refresh((r) => r + 1); };
     const close = (event: KeyboardEvent) => {
       if (event.key === "Escape") void api.closeSurface().catch((err) => setMessage(String(err)));
     };
     window.addEventListener("keydown", close);
     window.addEventListener("focus", updateDisplays);
     if (api.IN_TAURI) {
-      void listen("veil://changed", change).then((stop) => active ? cleanups.push(stop) : stop()).catch(() => {});
+      void listen("veil://changed", refresh).then((stop) => active ? cleanups.push(stop) : stop()).catch(() => {});
       void listen<DesktopPreferences>("veil://preferences", (event) => {
         setMode(event.payload.preview_mode);
-        change();
+        refresh();
       }).then((stop) => active ? cleanups.push(stop) : stop()).catch(() => {});
     }
     updateDisplays();
@@ -45,7 +50,7 @@ export default function Surface() {
       window.removeEventListener("focus", updateDisplays);
       cleanups.forEach((stop) => stop());
     };
-  }, []);
+  }, [refresh]);
 
   useEffect(() => {
     if (!mode) return;
@@ -57,7 +62,9 @@ export default function Surface() {
         if (document.hidden) return;
         if (!monitor) { setMessage("Choose one display to start native streaming."); return; }
         setMessage("Waiting for the first native frame…");
-        stop = playNativeStream(monitor, setSrc, (error) => {
+        stop = playNativeStream(monitor, (frame) => {
+          if (active && captureRevision.current === revision) setSrc(frame);
+        }, (error) => {
           stop = undefined;
           if (active) setMessage(`${error} Use the dashboard’s Surface → Surface playback to switch to snapshots.`);
         });
@@ -83,12 +90,14 @@ export default function Surface() {
         }
         minimized = false;
         if (inFlight.current) await inFlight.current.catch(() => {});
-        if (!active || epoch !== version || document.hidden) return;
+        if (!active || epoch !== version || document.hidden || captureRevision.current !== revision) return;
         const request = api.preview(monitor, mode === "motion");
         inFlight.current = request;
         try {
           const frame = await request;
-          if (active && epoch === version && !document.hidden) setSrc(`data:image/png;base64,${frame.png_base64}`);
+          if (active && epoch === version && !document.hidden && captureRevision.current === revision) {
+            setSrc(`data:image/png;base64,${frame.png_base64}`);
+          }
         } finally {
           if (inFlight.current === request) inFlight.current = null;
         }
@@ -122,8 +131,8 @@ export default function Surface() {
   return <div className="surface">
     {src ? <img src={src} alt="Veil Surface capture" /> : <div className="surface-status px-8 text-center" role="status">{message}</div>}
     <div className={`absolute top-0 right-0 left-0 flex items-center justify-end gap-3 bg-black/85 px-3 py-2 text-white transition-opacity hover:opacity-100 focus-within:opacity-100 ${src ? "opacity-0" : "opacity-100"}`}>
-      <DisplayPicker displays={displays} value={monitor} onChange={(value) => { setSrc(null); setMessage("Switching displays…"); setMonitor(value); }} />
-      <button type="button" title="Refresh the Surface frame" aria-label="Refresh the Surface frame" onClick={() => refresh((r) => r + 1)}><RefreshCw size={16} /></button>
+      <DisplayPicker displays={displays} value={monitor} onChange={(value) => { refresh(); setMonitor(value); }} />
+      <button type="button" title="Refresh the Surface frame" aria-label="Refresh the Surface frame" onClick={refresh}><RefreshCw size={16} /></button>
       <button type="button" title="Close Surface (Esc)" aria-label="Close Surface" onClick={() => void api.closeSurface().catch((err) => setMessage(String(err)))}><X size={18} /></button>
     </div>
   </div>;

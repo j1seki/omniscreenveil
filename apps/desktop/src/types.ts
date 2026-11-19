@@ -121,6 +121,7 @@ export interface Inventory {
   armed?: boolean;
   capture_active?: boolean;
   automation_paused?: boolean;
+  profile_error?: string | null;
   mac_permissions?: MacPermissions | null;
 }
 

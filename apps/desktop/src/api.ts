@@ -286,7 +286,7 @@ export async function capabilityMatrix(): Promise<Capabilities[]> {
               ? {
                   level: "partial" as const,
                   detail:
-                    "Sway/Hyprland: wlr-screencopy via grim plus compositor IPC geometry. GNOME/KDE fall back to portal mirroring.",
+                    "Requires grim and sway or Hyprland compositor IPC. Other Wayland compositors show a labelled simulation.",
                 }
               : { level: "native" as const },
           strict_hide:

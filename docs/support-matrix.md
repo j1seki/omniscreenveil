@@ -21,8 +21,8 @@ pretend otherwise.
 |---|---|---|---|---|
 | **Windows 10 2004+ / 11** | **partial / experimental** | **partial / experimental** | **partial / experimental** | Helper injection and GDI capture require native runtime validation. Test the actual capture application. |
 | **macOS 14+** | **unsupported** — no public ScreenCaptureKit exclusion API for foreign windows | **partial / experimental** | **partial / experimental** | ScreenCaptureKit and Accessibility require consent and native runtime validation. |
-| **Linux / X11** | **unsupported** — needs a privileged Xorg XACE module | **native** | **native** | Root-window capture + `XGetGeometry` inventory; `XUnmapWindow` strict hide. |
-| **Linux / Wayland** | **unsupported** — compositors do not expose per-window capture exclusion | **partial** — sway/Hyprland: wlr-screencopy capture + IPC geometry; GNOME/KDE: portal mirror fallback | **partial** — sway/Hyprland IPC moves the window off-screen; GNOME Shell and KDE Plasma need a desktop extension | Per-window exclusion remains impossible. Capture uses `grim` (wlr-screencopy); no private compositor patches. |
+| **Linux / X11** | **unsupported** | **native** | **native** | XComposite or root-window capture, with window frames included in masks. Strict hide unmaps windows. |
+| **Linux / Wayland** | **unsupported** | **partial** | **partial** | sway and Hyprland use `grim` and compositor IPC. GNOME Shell and KDE Plasma show a labelled simulation. |
 
 ### Why Exclusion is not universal
 
@@ -47,10 +47,10 @@ pretend otherwise.
 | Windows strict hide | `ShowWindow(SW_HIDE)` removes the canary from a desktop capture; `SW_SHOW` restores it. |
 | macOS Surface | ScreenCaptureKit filters selected window IDs out of the main-display capture. Verify a visible canary window disappears from the Surface and reappears after release on a consented Mac. |
 | macOS strict hide | Accessibility `AXMinimized` removes the window from the capture and `AXMinimized=false` restores it; requires consented permission. |
-| X11 Surface | `crates/veil-protect-linux/tests/x11_end_to_end.rs`: canary present in root capture, removed by `SurfacePlan`, strict hide removes it, remap restores it. |
-| X11 strict hide | Same test, using `XUnmapWindow` / `XMapWindow`. |
-| Wayland Surface | Phase 1 on sway/Hyprland: `grim` capture + `swaymsg`/`hyprctl` geometry, masked by the Surface, same canary harness. GNOME/KDE report partial until a provider ships. |
-| Wayland strict hide | `crates/veil-protect-wayland` unit tests cover sway/Hyprland inventory parsing and command construction; runtime validation requires a live compositor. |
+| X11 Surface | The Xvfb integration test checks the canary and window-manager frame pixels before and after masking. |
+| X11 strict hide | The same test checks unmap, recovery through a new X11 connection and restored pixels. |
+| Wayland Surface | Live sway and `grim` checks cover the window body and compositor title bar. Hyprland needs runtime validation. |
+| Wayland strict hide | A live sway check verifies a window moves to the hidden workspace and is restored on release. Hyprland needs runtime validation. |
 | Any platform, missing permission | The verifier returns `Inconclusive`, never `Protected`. |
 
 ## What is deliberately out of scope
@@ -69,7 +69,7 @@ pretend otherwise.
 | Windows | none for display affinity; the hook is loaded only into the selected app | on first arm | Exclusion fails visibly; Surface / strict hide still available |
 | macOS | Screen Recording (capture), Accessibility (strict hide) | when requested from the desktop app’s permission panel | the affected feature is unavailable; the app starts and can still use the other feature if its permission is granted |
 | X11 | access to `$DISPLAY` | on connect | simulated backend, labelled in the UI |
-| Wayland | portal screen-cast consent | when the Surface starts | partial/unsupported, labelled in the UI |
+| Wayland | Access to the compositor IPC socket and `grim` capture | When inventory or capture runs | Inventory and capture errors are shown in the UI |
 
 There is no silent elevation, no helper installed as a service, and no
 background process that outlives the app.

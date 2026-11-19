@@ -55,17 +55,16 @@ willingly captures the window outside OmniScreenVeil.
   On a single-monitor Wayland setup the Surface window's own rectangle will
   therefore appear checker-filled if it sits on the captured output; placing the
   Surface window on a second monitor avoids that overlap.
-- On Wayland, the portal may deliver a stream with geometry the compositor does
-  not expose. Until a provider supplies window rectangles, the Surface is
-  partial and the app falls back to mirroring one window.
+- On Wayland, live capture requires `grim` and compositor geometry from sway
+  or Hyprland. Other compositors show a labelled simulation.
 
 ### Strict hide (all platforms)
 
 - Hiding is local and visible: the window disappears for the user too. This is
   a fallback, not a stealth feature.
-- Restoration is best-effort and tracked. If the app crashes while windows are
-  hidden, the OS usually keeps them hidden until the owning process exits;
-  there is no privileged watchdog by design.
+- On restart, X11 restores windows marked by this app. On sway, windows still
+  on the private workspace return to the current workspace. Restoration after
+  a crash on Windows or macOS can require restarting the affected app.
 - macOS Accessibility can fail for hardened apps or after a permission reset.
   The failure is surfaced, and the window is not reported as protected.
 
@@ -103,6 +102,6 @@ touches pixels and it never reports those windows as protected.
 | Capture path ignores the OS flag (some games, overlays) | Pixel verification; the UI reports Visible. |
 | Audience shares the full desktop in Surface mode | Prominent UI copy: share the Surface window. Not technically preventable. |
 | Target process is hostile and undoes the flag | Re-applied on each tick; documented as out of scope against a local attacker. |
-| Wayland has no geometry provider | Surface is partial; strict hide still works; the UI says so. |
-| App crash while strict-hidden | Windows are normally restored when the owning process exits; no privileged watchdog. |
+| Wayland compositor has no supported provider | The UI shows a labelled simulation. |
+| App crash while strict-hidden | The journal records pending side effects before activation. Recovery depends on platform and runs when the app restarts. |
 | Window titles / thumbnails leak | Not claimed; OS-level surfaces are outside the pixel guarantee. |

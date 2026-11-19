@@ -61,7 +61,7 @@ impl DesktopBackend {
                                 platform: Platform::LinuxX11,
                                 name: "X11".into(),
                                 live: true,
-                                note: "Live X11 session. Surface masks Windows; strict hide unmaps them.".into(),
+                                note: "Live X11 session. Surface masks selected windows. Strict hide removes them from your desktop.".into(),
                             },
                         );
                     }
@@ -238,15 +238,15 @@ impl DesktopBackend {
     }
 
     /// Bounds of every app-owned window, so the surface never composites itself.
-    pub fn own_windows(&self) -> Vec<veil_core::Rect> {
+    pub fn own_windows(&self) -> Result<Vec<veil_core::Rect>, String> {
         match self {
             #[cfg(target_os = "linux")]
-            Self::X11(backend) => backend.own_windows(),
+            Self::X11(backend) => backend.own_windows().map_err(|err| err.to_string()),
             #[cfg(target_os = "linux")]
-            Self::Wayland(backend) => backend.own_windows(),
+            Self::Wayland(backend) => backend.own_windows().map_err(|err| err.to_string()),
             #[cfg(windows)]
-            Self::Windows(backend) => backend.own_windows(),
-            _ => Vec::new(),
+            Self::Windows(backend) => Ok(backend.own_windows()),
+            _ => Ok(Vec::new()),
         }
     }
 }

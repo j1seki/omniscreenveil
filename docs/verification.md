@@ -1,10 +1,9 @@
 # Verification
 
-The desktop audit is a synthetic compositor self-test. It does **not** verify
-your selected windows, the Windows display-affinity setting, or the capture path
-used by your meeting or recording application. Test that actual capture path
-before sharing sensitive content. Windows and macOS runtime behavior has not
-been validated in this Linux environment.
+The desktop **Capture test** compares live Surface frames with protection off
+and on. For Windows Exclusion and other capture paths, verify the receiver's
+view in the actual meeting or recording application. Windows and macOS have Rust
+cross-target checks and still need native runtime validation.
 
 ## The harness
 
@@ -39,15 +38,15 @@ cargo test -p veil-protect-linux --test x11_end_to_end
 ```
 
 `crates/veil-protect-linux/tests/x11_end_to_end.rs` starts its own `Xvfb`
-(800×600), draws a real canary window, captures the root window, and asserts:
+(800×600), draws a canary window, and checks real root and composite captures.
 
-1. the canary is detectable in the raw root capture,
-2. the Veil Surface plan removes it from the composited frame,
-3. `XUnmapWindow` strict hide removes it from a fresh root capture,
-4. `XMapWindow` restores it.
+1. The canary is detectable in the raw root capture.
+2. The Surface masks both the canary and a reparenting window-manager frame.
+3. Strict hide removes the canary from a fresh root capture.
+4. A new backend restores the marked window after it is withdrawn from the
+   managed inventory. A mismatched PID or a missing marker leaves it alone.
 
-The test reports a skip if `Xvfb` is unavailable. It passed in this repository
-in ~0.5 s. See the evidence section below.
+The test reports a skip if `Xvfb` is unavailable.
 
 ### Headless core self-test
 
@@ -61,11 +60,13 @@ permissions required.
 
 ### Desktop app
 
-The Tauri app was launched under Xvfb with a live X11 backend and an `xmessage`
-window. The inventory showed only that foreign window (the app's own windows are
-filtered by PID), the Veil Surface preview masked the app's own rectangle to
-avoid recursion, and the capability matrix rendered `Exclusion → unsupported`
-for X11.
+The native Linux app was launched under Xvfb with Xfwm and a sample window.
+The Windows page configured a Surface rule. The separate Surface showed the
+sample's title bar and body before arming and masked both afterward while the
+original stayed visible. **Capture test** displayed both states. Strict hide
+unmapped the window. Both a normal quit and a relaunch after a forced
+termination restored the original window. A separate launch with an unreadable
+profile kept the original file and withheld Surface frames.
 
 ## What must be run on real Windows and macOS
 
@@ -73,7 +74,7 @@ These are deliberately not claimed from a Linux VM.
 
 ### Windows
 
-1. Build the app with the MSVC toolchain; `pnpm build` stages
+1. Build the app with the MSVC toolchain. `pnpm tauri build` stages
    `veil_hook_win.dll` next to the executable automatically.
 2. Start a canary host (any window drawing a known token) and a capture client
    that uses Windows Graphics Capture (OBS "Windows 10" source, or the bundled
@@ -101,10 +102,12 @@ cd platform/macos && swift build -c release && swift test
 
 ### Wayland
 
-The sway/Hyprland backend is implemented in `crates/veil-protect-wayland`.
-It has no live compositor to test against in this repository's headless VM, so
-runtime validation is explicitly listed as unverified. Unit tests cover the
-parts that can be checked deterministically:
+The native app and CLI were exercised against a headless sway compositor with
+`grim`. The app opened the dashboard and share window without an X server.
+Pixel checks covered the sample window body and compositor title bar in the
+Surface. A second matching window activated the existing rule through the
+live IPC subscription. The CLI also confirmed strict hide and restoration.
+Hyprland still needs runtime validation.
 
 ```sh
 cargo test -p veil-protect-wayland
@@ -129,29 +132,14 @@ cargo run -p veil-cli -- release <window-id>
 Confirm the Surface masks protected rectangles and strict hide removes the
 window from `grim` output. GNOME/KDE must report partial, not protected.
 
-## Evidence from this repository
+## Development checks
 
-Environment: headless aarch64 Debian 13 VM, Rust workspace, `Xvfb` available.
-
-`cargo test --workspace` (2026-11-11):
-
+```sh
+cargo test --locked --workspace
+cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+cargo run --locked -p veil-cli -- selftest
+pnpm --dir apps/desktop build
 ```
-veil-canary           10 passed
-veil-cli               3 passed
-veil-core             27 passed
-veil-protect         9 passed
-veil-protect-linux     1 passed  (x11_end_to_end, real Xvfb pixels)
-veil-protect-wayland   9 passed  (sway/Hyprland JSON + PPM parsing)
-veil-protect-win       3 passed  (compile-gated unit checks)
-veil-surface          11 passed
-veil-verify            5 passed
-all other targets      0 failed
-```
-
-`veil selftest` → 12/12 PASS, exit code 0.
-
-Frontend: `pnpm build` (tsc + Vite) succeeds. Tauri Rust: `cargo build` succeeds
-against `libwebkit2gtk-4.1`.
 
 Visual evidence: the screenshots in `docs/images/` were captured from the
 running app under Xvfb + `xcompmgr` with a live X11 backend. They are not

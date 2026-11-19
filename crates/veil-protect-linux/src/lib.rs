@@ -11,7 +11,7 @@
 #![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use thiserror::Error;
 use veil_core::geometry::{Rect, Size};
@@ -27,10 +27,11 @@ use veil_verify::{CaptureError, CaptureSource};
 use x11rb::connection::Connection;
 use x11rb::protocol::composite::ConnectionExt as CompositeExt;
 use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ConnectionExt, CreateWindowAux, EventMask, ImageFormat, MapState, Window,
-    WindowClass,
+    Atom, AtomEnum, ConnectionExt, CreateWindowAux, EventMask, ImageFormat, MapState, PropMode,
+    Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
+use x11rb::wrapper::ConnectionExt as _;
 
 #[derive(Debug, Error)]
 pub enum X11Error {
@@ -56,6 +57,7 @@ struct Atoms {
     net_wm_name: Atom,
     net_wm_type: Atom,
     utf8: Atom,
+    strict_hidden: Atom,
     skip_types: Vec<Atom>,
 }
 
@@ -71,6 +73,7 @@ impl Atoms {
             net_wm_name: atom(b"_NET_WM_NAME")?,
             net_wm_type: atom(b"_NET_WM_WINDOW_TYPE")?,
             utf8: atom(b"UTF8_STRING")?,
+            strict_hidden: atom(b"_OMNISCREENVEIL_STRICT_HIDDEN")?,
             skip_types: [
                 b"_NET_WM_WINDOW_TYPE_DESKTOP".as_slice(),
                 b"_NET_WM_WINDOW_TYPE_DOCK",
@@ -247,10 +250,6 @@ impl X11Platform {
         if geom.width < 32 || geom.height < 32 {
             return Ok(None);
         }
-        let translated = self
-            .conn
-            .translate_coordinates(id, self.root, 0, 0)?
-            .reply()?;
         let wm_type = self.window_types(id)?;
         if wm_type
             .iter()
@@ -303,12 +302,7 @@ impl X11Platform {
             app_name,
             title,
             pid,
-            bounds: Rect::new(
-                translated.dst_x as i32,
-                translated.dst_y as i32,
-                geom.width as u32,
-                geom.height as u32,
-            ),
+            bounds: self.capture_bounds(id)?,
             monitor: None,
             visible: attrs.map_state == MapState::VIEWABLE,
             minimized: attrs.map_state != MapState::VIEWABLE,
@@ -316,6 +310,34 @@ impl X11Platform {
             platform: Platform::LinuxX11,
             icon: String::new(),
         }))
+    }
+
+    /// The pixels in a desktop capture include the window manager's frame
+    /// (including the title bar) as well as the client window.
+    fn capture_bounds(&self, mut id: Window) -> Result<Rect, X11Error> {
+        loop {
+            let tree = self.conn.query_tree(id)?.reply()?;
+            if tree.parent == self.root || tree.parent == x11rb::NONE {
+                break;
+            }
+            id = tree.parent;
+        }
+        self.outer_bounds(id)
+    }
+
+    fn outer_bounds(&self, id: Window) -> Result<Rect, X11Error> {
+        let geometry = self.conn.get_geometry(id)?.reply()?;
+        let position = self
+            .conn
+            .translate_coordinates(id, self.root, 0, 0)?
+            .reply()?;
+        let border = geometry.border_width;
+        Ok(Rect::new(
+            i32::from(position.dst_x) - i32::from(border),
+            i32::from(position.dst_y) - i32::from(border),
+            u32::from(geometry.width) + 2 * u32::from(border),
+            u32::from(geometry.height) + 2 * u32::from(border),
+        ))
     }
 
     fn window_types(&self, id: Window) -> Result<Vec<Atom>, X11Error> {
@@ -398,12 +420,68 @@ impl X11Platform {
     pub fn set_mapped(&self, window: WindowId, mapped: bool) -> Result<(), X11Error> {
         let id = window.0 as Window;
         if mapped {
-            self.conn.map_window(id)?;
+            self.conn.map_window(id)?.check()?;
+            self.conn
+                .delete_property(id, self.atoms.strict_hidden)?
+                .check()?;
         } else {
-            self.conn.unmap_window(id)?;
+            self.conn.unmap_window(id)?.check()?;
         }
-        self.conn.flush()?;
         Ok(())
+    }
+
+    fn hide_for_session(&self, window: WindowId, pid: u32) -> Result<bool, X11Error> {
+        let id = window.0 as Window;
+        let attrs = self.conn.get_window_attributes(id)?.reply()?;
+        if attrs.map_state == MapState::UNMAPPED {
+            return Ok(false);
+        }
+        if self.window_pid(id).unwrap_or(0) != pid {
+            return Err(X11Error::NoSuchWindow(window));
+        }
+        // A property lives with the X window across a client disconnect. Set
+        // it before unmapping so restart can distinguish our hide from an
+        // unrelated unmapped window, even if the WM drops it from inventory.
+        self.conn
+            .change_property32(
+                PropMode::REPLACE,
+                id,
+                self.atoms.strict_hidden,
+                AtomEnum::CARDINAL,
+                &[pid],
+            )?
+            .check()?;
+        self.set_mapped(window, false)?;
+        Ok(true)
+    }
+
+    pub fn restore_strict_hide(&self, window: WindowId, pid: u32) -> Result<bool, X11Error> {
+        let id = window.0 as Window;
+        let marker = match self
+            .conn
+            .get_property(
+                false,
+                id,
+                self.atoms.strict_hidden,
+                AtomEnum::CARDINAL,
+                0,
+                1,
+            )?
+            .reply()
+        {
+            Ok(reply) => reply.value32().and_then(|mut values| values.next()),
+            Err(x11rb::errors::ReplyError::X11Error(err))
+                if err.error_kind == x11rb::protocol::ErrorKind::Window =>
+            {
+                return Ok(false);
+            }
+            Err(err) => return Err(err.into()),
+        };
+        if marker != Some(pid) || self.window_pid(id).unwrap_or(0) != pid {
+            return Ok(false);
+        }
+        self.set_mapped(window, true)?;
+        Ok(true)
     }
 
     fn is_own_window(&self, id: Window, own_pid: u32) -> bool {
@@ -429,15 +507,8 @@ impl X11Platform {
     /// recurses into the app UI. This includes both the main window and a
     /// separate Surface window, so the compositor paints the placeholder over
     /// all of them.
-    pub fn own_windows(&self) -> Vec<Rect> {
-        let Some(tree) = self
-            .conn
-            .query_tree(self.root)
-            .ok()
-            .and_then(|cookie| cookie.reply().ok())
-        else {
-            return Vec::new();
-        };
+    pub fn own_windows(&self) -> Result<Vec<Rect>, X11Error> {
+        let tree = self.conn.query_tree(self.root)?.reply()?;
         let pid = std::process::id();
         let mut out = Vec::new();
         for id in tree.children {
@@ -455,33 +526,11 @@ impl X11Platform {
             if !self.is_own_window(id, pid) {
                 continue;
             }
-            let Some(geom) = self
-                .conn
-                .get_geometry(id)
-                .ok()
-                .and_then(|cookie| cookie.reply().ok())
-            else {
-                continue;
-            };
-            if geom.width < 64 || geom.height < 64 {
-                continue;
+            if let Ok(bounds) = self.outer_bounds(id) {
+                out.push(bounds);
             }
-            let Some(translated) = self
-                .conn
-                .translate_coordinates(id, self.root, 0, 0)
-                .ok()
-                .and_then(|cookie| cookie.reply().ok())
-            else {
-                continue;
-            };
-            out.push(Rect::new(
-                translated.dst_x as i32,
-                translated.dst_y as i32,
-                geom.width as u32,
-                geom.height as u32,
-            ));
         }
-        out
+        Ok(out)
     }
 
     /// Capture the desktop by compositing foreign top-level windows.
@@ -761,14 +810,18 @@ impl CaptureSource for X11Capture {
 ///   unsupported, and the engine downgrades before we ever see it.
 pub struct X11Backend {
     platform: X11Platform,
-    hidden: BTreeSet<WindowId>,
+    hidden: BTreeMap<WindowId, u32>,
 }
 
 impl X11Backend {
     pub fn connect() -> Result<Self, X11Error> {
+        Self::connect_to(None)
+    }
+
+    pub fn connect_to(display: Option<&str>) -> Result<Self, X11Error> {
         Ok(Self {
-            platform: X11Platform::connect()?,
-            hidden: BTreeSet::new(),
+            platform: X11Platform::connect_to(display)?,
+            hidden: BTreeMap::new(),
         })
     }
 
@@ -781,7 +834,7 @@ impl X11Backend {
         // Keep strict-hidden windows in the inventory even if the window
         // manager removed them from `_NET_CLIENT_LIST` after we unmapped them.
         // Dropping them would make reconcile release and re-hide in a loop.
-        for id in &self.hidden {
+        for id in self.hidden.keys() {
             if windows.iter().any(|window| window.id == *id) {
                 continue;
             }
@@ -793,11 +846,7 @@ impl X11Backend {
         Ok(windows)
     }
 
-    pub fn hidden(&self) -> &BTreeSet<WindowId> {
-        &self.hidden
-    }
-
-    pub fn own_windows(&self) -> Vec<Rect> {
+    pub fn own_windows(&self) -> Result<Vec<Rect>, X11Error> {
         self.platform.own_windows()
     }
 }
@@ -811,10 +860,13 @@ impl ProtectionBackend for X11Backend {
         match intent.mode {
             ProtectionMode::Surface => Ok(()),
             ProtectionMode::StrictHide => {
-                self.platform
-                    .set_mapped(intent.window, false)
-                    .map_err(|e| BackendError::failed(e.to_string()))?;
-                self.hidden.insert(intent.window);
+                let changed = self
+                    .platform
+                    .hide_for_session(intent.window, intent.pid)
+                    .map_err(|err| BackendError::failed(err.to_string()))?;
+                if changed {
+                    self.hidden.insert(intent.window, intent.pid);
+                }
                 Ok(())
             }
             ProtectionMode::Exclusion => Err(BackendError::Unsupported {
@@ -826,20 +878,13 @@ impl ProtectionBackend for X11Backend {
     }
 
     fn release(&mut self, window: WindowId) -> Result<(), BackendError> {
-        if !self.hidden.remove(&window) {
-            return Ok(());
+        if let Some(&pid) = self.hidden.get(&window) {
+            self.platform
+                .restore_strict_hide(window, pid)
+                .map_err(|err| BackendError::failed(err.to_string()))?;
+            self.hidden.remove(&window);
         }
-        match self.platform.set_mapped(window, true) {
-            Ok(()) => Ok(()),
-            // The window may have been destroyed while hidden; that is not an
-            // error, there is nothing left to restore.
-            Err(X11Error::Request(x11rb::errors::ReplyOrIdError::X11Error(err)))
-                if err.error_kind == x11rb::protocol::ErrorKind::Window =>
-            {
-                Ok(())
-            }
-            Err(e) => Err(BackendError::failed(e.to_string())),
-        }
+        Ok(())
     }
 }
 

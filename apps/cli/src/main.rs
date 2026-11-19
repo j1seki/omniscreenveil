@@ -16,7 +16,7 @@ use serde_json::json;
 use veil_core::capability::ProtectionMode;
 use veil_core::ids::{AppKey, WindowId};
 use veil_core::testutil::demo_windows;
-use veil_core::{Platform, PlatformCapabilities, Profile, Size, VerifyOutcome};
+use veil_core::{Platform, PlatformCapabilities, Profile, Rect, Size, VerifyOutcome, WindowInfo};
 #[cfg(target_os = "linux")]
 use veil_protect::TickReport;
 use veil_protect::{Engine, MemoryBackend};
@@ -47,18 +47,18 @@ enum Command {
     Selftest,
     /// List live top-level windows.
     List,
-    /// Render a Veil Surface preview to a PPM image.
+    /// Render a Veil Surface snapshot to a PNG or PPM image.
     Surface {
         #[arg(long, default_value = "veil-surface.ppm")]
         out: PathBuf,
         /// Window ids to mask (hex or decimal).
         #[arg(long, value_delimiter = ',')]
         protect: Vec<String>,
-        /// Capture the live X11 desktop instead of the synthetic one.
+        /// Capture the live desktop.
         #[arg(long)]
         live: bool,
     },
-    /// Hide a window on X11 (strict-hide mode).
+    /// Strict-hide a window on X11, sway, or Hyprland.
     Protect {
         window: String,
         #[arg(long, default_value = "strict-hide")]
@@ -460,31 +460,57 @@ fn list_wayland(_json: bool) -> Result<i32> {
     bail!("Wayland inventory is only available on Unix hosts")
 }
 
+fn selected_bounds(windows: &[WindowInfo], ids: &[WindowId]) -> Result<Vec<Rect>> {
+    ids.iter()
+        .map(|id| {
+            windows
+                .iter()
+                .find(|window| window.id == *id)
+                .map(|window| window.bounds)
+                .ok_or_else(|| anyhow!("window {id} is not a live top-level window"))
+        })
+        .collect()
+}
+
+fn masked_capture(
+    frame: veil_surface::Frame,
+    masks: impl IntoIterator<Item = Rect>,
+) -> (veil_surface::SurfacePlan, veil_surface::Frame) {
+    let plan = masks.into_iter().fold(
+        veil_surface::SurfacePlan::new(frame.size(), veil_core::FillStyle::veiled()),
+        |plan, bounds| plan.exclude(bounds),
+    );
+    (plan, frame)
+}
+
 #[cfg(target_os = "linux")]
 fn x11_plan_and_capture(
     ids: &[WindowId],
 ) -> Result<(veil_surface::SurfacePlan, veil_surface::Frame)> {
     let platform =
         veil_protect_linux::X11Platform::connect().context("--live requires an X11 display")?;
+    let bounds = selected_bounds(&platform.list_windows()?, ids)?;
     let size = platform.root_size()?;
-    let windows = platform.list_windows()?;
-    let mut protected = std::collections::BTreeMap::new();
-    for id in ids {
-        if !windows.iter().any(|w| w.id == *id) {
-            bail!("window {id} is not a live top-level window");
-        }
-        protected.insert(*id, ProtectionMode::Surface);
+    let compositor = platform.has_compositor();
+    let own = if compositor {
+        Vec::new()
+    } else {
+        platform.own_windows()?
+    };
+    let frame = if compositor {
+        platform.capture_desktop()?
+    } else {
+        platform.capture_root()?
+    };
+    if bounds != selected_bounds(&platform.list_windows()?, ids)?
+        || size != platform.root_size()?
+        || size != frame.size()
+        || compositor != platform.has_compositor()
+        || (!compositor && own != platform.own_windows()?)
+    {
+        bail!("desktop geometry changed during capture; retry the snapshot");
     }
-    let plan = veil_protect_linux::surface_plan(
-        size,
-        &windows,
-        &protected,
-        veil_core::FillStyle::veiled(),
-        None,
-    );
-    let mut capture = veil_protect_linux::X11Capture::connect()?;
-    let frame = veil_verify::CaptureSource::capture(&mut capture)?;
-    Ok((plan, frame))
+    Ok(masked_capture(frame, bounds.into_iter().chain(own)))
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -499,25 +525,30 @@ fn wayland_plan_and_capture(
     ids: &[WindowId],
 ) -> Result<(veil_surface::SurfacePlan, veil_surface::Frame)> {
     let backend = veil_protect_wayland::WaylandBackend::new()?;
-    let windows = backend.list_windows()?;
-    for id in ids {
-        if !windows.iter().any(|w| w.id == *id) {
-            bail!("window {id} is not a live Wayland top-level window");
-        }
+    let bounds = selected_bounds(&backend.list_windows()?, ids)?;
+    let outputs = backend.outputs()?;
+    let region = outputs
+        .iter()
+        .map(|(_, rect)| *rect)
+        .reduce(|a, b| a.union(&b))
+        .context("could not locate any Wayland outputs")?;
+    let own = backend.own_windows()?;
+    let frame = backend.capture_region(Some(region))?;
+    if bounds != selected_bounds(&backend.list_windows()?, ids)?
+        || outputs != backend.outputs()?
+        || frame.width != region.w
+        || frame.height != region.h
+        || own != backend.own_windows()?
+    {
+        bail!("desktop geometry changed during capture; retry the snapshot");
     }
-    let frame = backend.capture_root()?;
-    let mut plan = veil_surface::SurfacePlan::new(frame.size(), veil_core::FillStyle::veiled());
-    for window in &windows {
-        if ids.contains(&window.id) {
-            plan = plan.exclude(window.bounds);
-        }
-    }
-    // The app's own window is part of the capture; mask it so the Surface does
-    // not recurse into itself.
-    for own in backend.own_windows() {
-        plan = plan.exclude(own);
-    }
-    Ok((plan, frame))
+    Ok(masked_capture(
+        frame,
+        bounds
+            .into_iter()
+            .chain(own)
+            .map(|bounds| bounds.translated(-region.x, -region.y)),
+    ))
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -531,43 +562,22 @@ fn win_plan_and_capture(
     ids: &[WindowId],
 ) -> Result<(veil_surface::SurfacePlan, veil_surface::Frame)> {
     let backend = veil_protect_win::WinBackend::new()?;
-    let windows = backend.list_windows()?;
-    for id in ids {
-        if !windows.iter().any(|w| w.id == *id) {
-            bail!("window {id} is not a live Windows top-level window");
-        }
-    }
+    let bounds = selected_bounds(&backend.inventory(false)?, ids)?;
+    let own = backend.own_windows();
     let frame = backend.capture_root()?;
-    let mut plan = veil_surface::SurfacePlan::new(frame.size(), veil_core::FillStyle::veiled());
-    for window in &windows {
-        if ids.contains(&window.id) {
-            plan = plan.exclude(window.bounds);
-        }
+    if bounds != selected_bounds(&backend.inventory(false)?, ids)? || own != backend.own_windows() {
+        bail!("desktop geometry changed during capture; retry the snapshot");
     }
-    for own in backend.own_windows() {
-        plan = plan.exclude(own);
-    }
-    Ok((plan, frame))
+    Ok(masked_capture(frame, bounds.into_iter().chain(own)))
 }
 
 fn macos_plan_and_capture(
     ids: &[WindowId],
 ) -> Result<(veil_surface::SurfacePlan, veil_surface::Frame)> {
     let backend = veil_protect_macos::MacBackend::new()?;
-    let windows = backend.list_windows()?;
-    for id in ids {
-        if !windows.iter().any(|w| w.id == *id) {
-            bail!("window {id} is not a live macOS top-level window");
-        }
-    }
-    let frame = backend.capture_root()?;
-    let mut plan = veil_surface::SurfacePlan::new(frame.size(), veil_core::FillStyle::veiled());
-    for window in &windows {
-        if ids.contains(&window.id) {
-            plan = plan.exclude(window.bounds);
-        }
-    }
-    Ok((plan, frame))
+    selected_bounds(&backend.inventory(false)?, ids)?;
+    let frame = backend.capture_filtered(&ids.iter().copied().collect())?;
+    Ok(masked_capture(frame, []))
 }
 
 fn truncate(value: &str, max: usize) -> String {
@@ -736,6 +746,9 @@ fn cmd_protect(json: bool, window: &str, mode: &str) -> Result<i32> {
     let platform = Platform::detect();
     let id = parse_window_id(window)?;
     let mode = parse_mode(mode)?;
+    if mode != ProtectionMode::StrictHide {
+        bail!("protect supports strict-hide. Use surface --live --protect <window> for a masked snapshot, or use the desktop app for ongoing protection");
+    }
     match platform {
         Platform::LinuxX11 => x11_protect(json, id, mode),
         Platform::LinuxWayland => wayland_protect(json, id, mode),
@@ -818,9 +831,8 @@ fn wayland_protect(_json: bool, _id: WindowId, _mode: ProtectionMode) -> Result<
 #[cfg(target_os = "linux")]
 fn wayland_release(json: bool, id: WindowId) -> Result<i32> {
     let mut backend = veil_protect_wayland::WaylandBackend::new()?;
-    // Populate workspace tracks so a strict-hidden window returns to its
-    // original workspace rather than the current one.
-    let _ = backend.list_windows();
+    // A fresh CLI process restores a hidden window to the current workspace.
+    backend.list_windows()?;
     veil_protect::ProtectionBackend::release(&mut backend, id)
         .map_err(|err| anyhow!(err.to_string()))?;
     if json {

@@ -77,7 +77,7 @@ export function WindowsPage({
 }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
-  const [showRadar, setShowRadar] = useState(true);
+  const [showRadar, setShowRadar] = useState(false);
   const [displays, setDisplays] = useState<Display[]>([]);
   useEffect(() => {
     const load = () => void api.surfaceDisplays().then(setDisplays, () => {});

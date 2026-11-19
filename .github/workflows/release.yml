@@ -2,6 +2,8 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
   workflow_dispatch:
@@ -12,41 +14,95 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: release-${{ inputs.release_tag || github.ref_name }}
-  cancel-in-progress: true
+  group: release
+  queue: max
 
 env:
   CARGO_TERM_COLOR: always
   BETA_MANIFEST_TAG: updater-beta
 
 jobs:
-  # Resolve and validate the release once. Every later job uses the same tag
-  # and channel, including workflow_dispatch runs started from a branch.
   prepare:
     name: prepare release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
     outputs:
       tag: ${{ steps.release.outputs.tag }}
+      sha: ${{ steps.release.outputs.sha }}
       version: ${{ steps.release.outputs.version }}
       channel: ${{ steps.release.outputs.channel }}
       prerelease: ${{ steps.release.outputs.prerelease }}
     steps:
+      - name: Identify a merged pull request
+        id: merge
+        if: github.event_name == 'push' && github.ref_type == 'branch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            prs=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls")
+            pr=$(jq -r --arg sha "$GITHUB_SHA" --arg branch "$GITHUB_REF_NAME" \
+              'first(.[] | select(.merged_at != null and .base.ref == $branch and .merge_commit_sha == $sha) | .number) // empty' <<< "$prs")
+            if [[ -n "$pr" ]]; then
+              echo "pr=$pr" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [[ "$attempt" != 3 ]]; then sleep 5; fi
+          done
+          echo "This main push does not correspond to a merged pull request."
+
       - uses: actions/checkout@v4
+        if: github.event_name == 'workflow_dispatch' || github.ref_type == 'tag' || steps.merge.outputs.pr != ''
         with:
-          ref: ${{ inputs.release_tag || github.ref }}
+          ref: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.sha }}
+          fetch-depth: 0
+          persist-credentials: ${{ steps.merge.outputs.pr != '' }}
 
       - name: Resolve tag and channel
         id: release
+        if: github.event_name == 'workflow_dispatch' || github.ref_type == 'tag' || steps.merge.outputs.pr != ''
         shell: bash
         env:
           INPUT_TAG: ${{ inputs.release_tag }}
-          REF_NAME: ${{ github.ref_name }}
+          MERGED_PR: ${{ steps.merge.outputs.pr }}
         run: |
           set -euo pipefail
-          tag="${INPUT_TAG:-$REF_NAME}"
+          if [[ -n "$MERGED_PR" ]]; then
+            # An annotated tag ties retries to the original build version.
+            subject="Automatic release for merge $GITHUB_SHA"
+            tag=$(git for-each-ref --format='%(refname:short)%09%(subject)' 'refs/tags/v*' \
+              | awk -F '\t' -v subject="$subject" '$2 == subject && !seen++ { print $1 }')
+            if [[ -n "$tag" ]]; then
+              git switch --detach "refs/tags/$tag"
+            else
+              config_version=$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")
+              mapfile -t tags < <(git tag --list 'v*')
+              version=$(node tools/release-version.mjs next "$config_version" "${tags[@]}")
+              node tools/release-version.mjs stamp "$version"
+              tag="v$version"
+
+              git config user.name 'github-actions[bot]'
+              git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+              if ! git diff --quiet; then
+                git add Cargo.toml Cargo.lock apps/desktop/package.json apps/desktop/src-tauri/{Cargo.toml,Cargo.lock,tauri.conf.json}
+                git commit -m "Prepare $tag from PR #$MERGED_PR"
+              fi
+              git tag -a "$tag" -m "$subject"
+              git push origin "refs/tags/$tag"
+            fi
+          elif [[ -n "$INPUT_TAG" || "$GITHUB_REF_TYPE" == tag ]]; then
+            tag="${INPUT_TAG:-$GITHUB_REF_NAME}"
+          else
+            echo "::error::Select a version tag or enter an existing release_tag."
+            exit 1
+          fi
           if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::Release tag '$tag' is not a supported vMAJOR.MINOR.PATCH[-pre] tag."
             exit 1
@@ -69,7 +125,9 @@ jobs:
             prerelease="false"
           fi
 
+          sha=$(git rev-parse HEAD)
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
@@ -78,6 +136,7 @@ jobs:
   build:
     name: build (${{ matrix.os }})
     needs: prepare
+    if: needs.prepare.outputs.tag != ''
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -95,7 +154,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.release_tag || github.ref }}
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
 
       - name: Verify updater signing secret
         shell: bash
@@ -276,14 +336,14 @@ jobs:
     name: publish release
     needs: [prepare, build]
     runs-on: ubuntu-latest
-    # Serialize publishes so two beta tags cannot race on the rolling manifest.
-    concurrency:
-      group: release-publish
-      cancel-in-progress: false
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.release_tag || github.ref }}
+          ref: ${{ github.workflow_sha }}
+          path: release-tooling
+          persist-credentials: false
 
       - uses: actions/download-artifact@v4
         with:
@@ -295,7 +355,19 @@ jobs:
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
           RELEASE_CHANNEL: ${{ needs.prepare.outputs.channel }}
-        run: node tools/release-manifest.mjs artifacts artifacts/latest.json
+        run: node release-tooling/tools/release-manifest.mjs artifacts artifacts/latest.json
+
+      - name: Check whether this version can update its channel
+        id: promote
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          published=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[] | select(.draft == false) | .tag_name')
+          mapfile -t tags <<< "$published"
+          eligible=$(node release-tooling/tools/release-version.mjs can-promote "$RELEASE_VERSION" "${tags[@]}")
+          echo "eligible=$eligible" >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v3
@@ -305,13 +377,13 @@ jobs:
           generate_release_notes: true
           prerelease: ${{ needs.prepare.outputs.prerelease }}
           # Stable releases own `releases/latest`; beta releases must not.
-          make_latest: ${{ needs.prepare.outputs.channel == 'stable' }}
+          make_latest: ${{ needs.prepare.outputs.channel == 'stable' && steps.promote.outputs.eligible == 'true' }}
 
       # `releases/latest/download/latest.json` is the stable endpoint.
       # Beta needs a stable URL that always points at the newest pre-release,
       # so every beta publish refreshes this rolling, non-latest release.
       - name: Refresh rolling beta manifest
-        if: needs.prepare.outputs.channel == 'beta'
+        if: needs.prepare.outputs.channel == 'beta' && steps.promote.outputs.eligible == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
