@@ -3,6 +3,10 @@
 - Status: accepted; implemented for sway/Hyprland (Phase 1)
 - Date: 2026-11
 
+The sway and Hyprland implementation uses `grim` with wlr-screencopy and the
+compositor's IPC. The portal and single-window mirror below describe the
+original design. GNOME Shell and KDE Plasma currently show a labelled simulation.
+
 ## Context
 
 On Wayland the compositor owns window geometry, stacking and capture. A normal

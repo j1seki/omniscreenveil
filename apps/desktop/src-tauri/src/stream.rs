@@ -33,6 +33,9 @@ fn masks(
     use tauri::Manager;
     let state = app.state::<std::sync::Mutex<super::AppState>>();
     let state = super::lock(&state)?;
+    if let Some(error) = &state.profile_error {
+        return Err(error.clone());
+    }
     if !super::displays(&state.engine.backend)?.contains(display) {
         return Err("The streaming display changed. Restart the stream.".into());
     }
@@ -44,7 +47,7 @@ fn masks(
         .filter(|w| targets.contains(&w.id) && w.bounds.intersects(&display.bounds))
         .map(|w| (w.id, w.bounds))
         .collect();
-    let own = super::own_capture_masks(&state.engine.backend, dashboard)
+    let own = super::own_capture_masks(&state.engine.backend, dashboard)?
         .into_iter()
         .filter(|(_, r)| r.intersects(&display.bounds))
         .collect();

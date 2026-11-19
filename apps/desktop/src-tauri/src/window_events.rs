@@ -162,43 +162,9 @@ fn wayland(signal: SyncSender<()>) -> bool {
         io::{BufRead, BufReader},
         os::unix::net::UnixStream,
         path::PathBuf,
-        process::{Command, Stdio},
     };
-    if std::env::var_os("SWAYSOCK").is_some() {
-        let Ok(mut child) = Command::new("swaymsg")
-            .args([
-                "-m",
-                "-t",
-                "subscribe",
-                "[\"window\",\"workspace\",\"output\"]",
-            ])
-            .stdout(Stdio::piped())
-            .spawn()
-        else {
-            return false;
-        };
-        let mut reader = BufReader::new(child.stdout.take().unwrap());
-        let mut response = String::new();
-        if reader.read_line(&mut response).unwrap_or(0) == 0 || !response.contains("true") {
-            let _ = child.kill();
-            let _ = child.wait();
-            return false;
-        }
-        std::thread::spawn(move || {
-            for line in reader.lines().map_while(Result::ok) {
-                if line.contains("\"change\"")
-                    && matches!(
-                        signal.try_send(()),
-                        Err(std::sync::mpsc::TrySendError::Disconnected(_))
-                    )
-                {
-                    break;
-                }
-            }
-            let _ = child.kill();
-            let _ = child.wait();
-        });
-        return true;
+    if let Some(socket) = std::env::var_os("SWAYSOCK") {
+        return sway(&socket, signal);
     }
     let Some(signature) = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE") else {
         return false;
@@ -227,6 +193,70 @@ fn wayland(signal: SyncSender<()>) -> bool {
             ]
             .iter()
             .any(|event| kind.starts_with(event))
+                && matches!(
+                    signal.try_send(()),
+                    Err(std::sync::mpsc::TrySendError::Disconnected(_))
+                )
+            {
+                break;
+            }
+        }
+    });
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn sway(path: &std::ffi::OsStr, signal: SyncSender<()>) -> bool {
+    use std::io::{self, Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    const MAGIC: &[u8; 6] = b"i3-ipc";
+    const SUBSCRIBE: u32 = 2;
+    const EVENTS: &[u8] = br#"["window","workspace","output"]"#;
+
+    fn packet(socket: &mut UnixStream) -> io::Result<(u32, Vec<u8>)> {
+        let mut header = [0; 14];
+        socket.read_exact(&mut header)?;
+        let len = u32::from_ne_bytes(header[6..10].try_into().unwrap()) as usize;
+        if &header[..6] != MAGIC || len > 16 * 1024 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid sway IPC packet",
+            ));
+        }
+        let kind = u32::from_ne_bytes(header[10..].try_into().unwrap());
+        let mut payload = vec![0; len];
+        socket.read_exact(&mut payload)?;
+        Ok((kind, payload))
+    }
+
+    let connect = || -> io::Result<UnixStream> {
+        let mut socket = UnixStream::connect(path)?;
+        let timeout = Some(Duration::from_millis(500));
+        socket.set_read_timeout(timeout)?;
+        socket.set_write_timeout(timeout)?;
+        let mut request = MAGIC.to_vec();
+        request.extend_from_slice(&(EVENTS.len() as u32).to_ne_bytes());
+        request.extend_from_slice(&SUBSCRIBE.to_ne_bytes());
+        request.extend_from_slice(EVENTS);
+        socket.write_all(&request)?;
+        let (kind, payload) = packet(&mut socket)?;
+        let reply: serde_json::Value = serde_json::from_slice(&payload)?;
+        if kind != SUBSCRIBE || reply["success"].as_bool() != Some(true) {
+            return Err(io::Error::other(
+                "sway rejected the window event subscription",
+            ));
+        }
+        socket.set_read_timeout(None)?;
+        Ok(socket)
+    };
+    let Ok(mut socket) = connect() else {
+        return false;
+    };
+    std::thread::spawn(move || {
+        while let Ok((kind, _)) = packet(&mut socket) {
+            if kind & (1 << 31) != 0
                 && matches!(
                     signal.try_send(()),
                     Err(std::sync::mpsc::TrySendError::Disconnected(_))

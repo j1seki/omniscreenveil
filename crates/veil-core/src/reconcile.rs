@@ -63,7 +63,7 @@ pub fn plan_with_caps(
     for intent in &mut desired {
         intent.mode = caps.effective_mode(intent.mode);
     }
-    diff(desired, conflicts, applied)
+    diff(desired, conflicts, applied, windows)
 }
 
 /// Resolve every enabled rule against the live window list.
@@ -122,13 +122,14 @@ pub fn plan(
     applied: &[AppliedProtection],
 ) -> ReconcilePlan {
     let (desired, conflicts) = intents(profile, windows);
-    diff(desired, conflicts, applied)
+    diff(desired, conflicts, applied, windows)
 }
 
 fn diff(
     mut desired: Vec<ProtectionIntent>,
     conflicts: Vec<Conflict>,
     applied: &[AppliedProtection],
+    windows: &[WindowInfo],
 ) -> ReconcilePlan {
     desired.sort_by_key(|i| i.window);
 
@@ -145,7 +146,13 @@ fn diff(
             None => out.apply.push(intent),
             Some(current) => {
                 let needs_apply = current.mode != intent.mode
-                    || matches!(current.status, ApplyStatus::Failed { .. });
+                    || matches!(current.status, ApplyStatus::Failed { .. })
+                    || (intent.mode == ProtectionMode::StrictHide
+                        && windows.iter().any(|w| {
+                            w.id == intent.window
+                                && w.platform == crate::window::Platform::LinuxX11
+                                && w.visible
+                        }));
                 if needs_apply {
                     out.apply.push(intent);
                 } else {

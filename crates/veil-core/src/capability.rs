@@ -164,8 +164,8 @@ impl PlatformCapabilities {
                 modes.insert(
                     ProtectionMode::Surface,
                     CapabilityLevel::Partial {
-                        detail: "Needs a desktop-specific geometry provider; falls back to \
-                                 mirroring a single window."
+                        detail: "Requires grim and sway or Hyprland compositor IPC. Other \
+                                 Wayland compositors show a labelled simulation."
                             .into(),
                     },
                 );

@@ -28,7 +28,7 @@ scope.
 
 ## Status
 
-This is a Phase 0/1 working implementation, not a finished store release.
+The desktop app is a prerelease. Linux/X11 and sway have live capture tests.
 
 - The shared core, canary verifier, Veil Surface compositor and CLI are
   implemented and tested on Linux.
@@ -41,10 +41,10 @@ This is a Phase 0/1 working implementation, not a finished store release.
   Phase 0 probes, but still need runtime validation on real Windows and macOS
   machines. Run the probes in [`docs/phase-0-spikes.md`](docs/phase-0-spikes.md)
   and report what you see.
-- Wayland now has a real backend for sway and Hyprland: `grim`/wlr-screencopy
-  capture plus compositor IPC geometry, and strict hide through the compositor's
-  own IPC. GNOME Shell and KDE Plasma lack a portable public equivalent and are
-  reported as partial until a desktop-specific provider lands.
+- The Wayland backend uses `grim` for capture and compositor IPC for geometry
+  and strict hide. The sway paths have been tested against a headless compositor.
+  Hyprland still needs runtime validation. GNOME Shell and KDE Plasma show
+  a labelled simulation.
 
 Verification is captured in [`docs/verification.md`](docs/verification.md).
 
@@ -104,9 +104,10 @@ in the UI.
 
 ## Build and run
 
-Prerequisites: Rust 1.80+, and for the desktop app Node 18+/pnpm plus the usual
-[Tauri 2 system dependencies](https://v2.tauri.app/start/prerequisites/). On
-Debian/Ubuntu the webview packages are `libwebkit2gtk-4.1-dev` and
+Use stable Rust. The locked dependencies require Rust 1.85+ for the workspace
+and 1.90+ for the desktop app. Desktop builds also need Node 20+, pnpm and the
+[Tauri 2 system dependencies](https://v2.tauri.app/start/prerequisites/).
+On Debian/Ubuntu the webview packages are `libwebkit2gtk-4.1-dev` and
 `libayatana-appindicator3-dev`.
 
 ```sh
@@ -127,9 +128,9 @@ cargo run -p veil-cli -- release 0x1a
 
 Desktop app:
 
-Prerequisites for the live Linux backends: X11 needs a display; sway/Hyprland
-need `grim` plus the compositor's own IPC tool (`swaymsg` or `hyprctl`). Without
-them the app falls back to a labelled simulation rather than pretending.
+X11 needs a display. For sway or Hyprland, install `grim` and the compositor's
+IPC tool (`swaymsg` or `hyprctl`). Missing capture tools produce a capture
+error in the app. Unsupported Wayland compositors show a labelled simulation.
 
 ```sh
 cd apps/desktop
@@ -218,14 +219,13 @@ and check that Surface capture and strict hide work independently.
 
 ## How protection works
 
-### Verification is a capture
+### Verify the output you intend to share
 
-Every claim is proven by pixels, not by a return code. The verifier composites
-an 8×8 canary token into the region, captures a **baseline**, arms protection,
-captures again, and searches for the token. A missing baseline is
-`Inconclusive`, never `Protected`. This is why the UI can say "Protected" with a
-reason attached, and why a failed permission produces a visible result instead
-of silent success.
+Use **Capture test** to compare live Surface frames with protection off and on.
+The active status in the dashboard indicates that the backend applied the rule.
+Check the receiver's view in your actual sharing app before showing sensitive
+content. The automated canary verifier compares pixels and reports
+`Inconclusive` when the baseline contains no canary.
 
 ### Windows
 
@@ -268,8 +268,10 @@ Mutter, ...) the backend composites foreign window pixmaps via XComposite
 (`NameWindowPixmap`), which captures obscured windows and drops the app's own
 control and Surface windows before the audience ever sees them. Without a
 compositor it falls back to a root capture and masks its own windows. Strict
-hide unmaps the window and restores it. All of these paths are proven in
-`crates/veil-protect-linux/tests/x11_end_to_end.rs`.
+hide unmaps the window and restores it. Starting the app again after a crash
+restores windows it marked before hiding, even if the window manager removed
+them from the inventory. Older builds can leave unmarked windows that need
+manual restoration with `veil release <window-id>`.
 
 The desktop app provides an **Open Surface** action (and tray entry). Share
 that dedicated window rather than your desktop. Hover along its top edge to
@@ -302,11 +304,10 @@ On Wayland the compositor owns geometry and capture. The sway/Hyprland backend
 combines two public surfaces: `grim` (wlr-screencopy) for frames and the
 compositor's own IPC (`swaymsg -t get_tree`, `hyprctl clients -j`) for window
 rectangles and strict hide. Protected windows are masked in the composited
-Surface; strict hide moves them to a private workspace and returns them to the
-original workspace on release. GNOME Shell and KDE Plasma do not expose a
-portable equivalent, so they fall back to simulation / single-window mirroring
-and are marked partial. `Exclusion` remains unsupported because no mainstream
-compositor exposes per-window capture exclusion.
+Surface. Strict hide moves them to a private workspace and returns them to
+the original workspace on release within the same session. After a restart or
+when using the CLI, restore moves them to the current workspace. GNOME Shell
+and KDE Plasma show a labelled simulation. `Exclusion` is unavailable on Wayland.
 
 ## Repository conventions
 
