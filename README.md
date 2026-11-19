@@ -161,8 +161,16 @@ open apps/desktop/src-tauri/target/release/bundle/macos/OmniScreenVeil.app
 
 ### Updates and release channels
 
-The desktop app uses Tauri's signed updater. Both channels are backed by the
-same GitHub Releases:
+The desktop app uses Tauri's signed updater.
+
+Merging a pull request into `main` starts the signed release workflow for that
+merge commit. The version in `tauri.conf.json` selects the channel. If its
+version is already used, the workflow increments the patch for stable or the
+prerelease identifier for beta. An automatic tag records the version used by
+all build jobs and lets a retry reuse it. Pushing a version tag or dispatching
+the workflow for an existing tag also works.
+
+Both channels use GitHub Releases.
 
 - **stable** — tags without a pre-release suffix (`v0.2.0`). The workflow
   publishes a normal GitHub release with `latest.json`; the app reads
