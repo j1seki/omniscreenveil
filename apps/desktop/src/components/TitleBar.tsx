@@ -15,7 +15,7 @@ const TITLES: Record<Page, { title: string; subtitle: string }> = {
   rules: { title: "Rules & automation", subtitle: "Persistent protection policies and auto-arm" },
   capabilities: { title: "Capabilities", subtitle: "What each operating system can actually do" },
   updates: { title: "Updates", subtitle: "Stable and beta release channels" },
-  settings: { title: "Settings", subtitle: "Startup, window behavior, and preview preferences" },
+  settings: { title: "Settings", subtitle: "Startup, window behavior, and appearance" },
 };
 
 export function TitleBar({
@@ -76,14 +76,15 @@ export function TitleBar({
 
         <Button
           variant="ghost"
-          size="icon"
+          size="sm"
           onClick={onRefresh}
           disabled={busy}
-          title={`Refresh window inventory (${MOD}R)`}
-          aria-label="Refresh window inventory"
-          className="size-8"
+          title={`Refresh windows (${MOD}R)`}
+          aria-label="Refresh windows"
+          className="h-8 gap-1.5 text-[12px]"
         >
           <RefreshCw className={cn("size-3.5", busy && "animate-spin")} />
+          <span className="hidden lg:inline">Refresh windows</span>
         </Button>
 
         <Button

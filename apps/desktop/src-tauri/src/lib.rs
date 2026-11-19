@@ -6,6 +6,8 @@
 
 mod backend;
 mod preferences;
+mod stream;
+mod window_events;
 
 use std::collections::BTreeSet;
 use std::sync::Mutex;
@@ -121,6 +123,13 @@ pub struct Inventory {
     capture_active: bool,
     automation_paused: bool,
     mac_permissions: Option<MacPermissions>,
+}
+
+struct NativeWindowEvents(bool);
+
+#[tauri::command]
+fn native_window_events(state: State<'_, NativeWindowEvents>) -> bool {
+    state.0
 }
 
 #[derive(Debug, Serialize)]
@@ -239,6 +248,19 @@ async fn inventory(state: State<'_, Mutex<AppState>>) -> Result<Inventory, Strin
     })
 }
 
+fn dashboard_id(_app: &tauri::AppHandle) -> Option<WindowId> {
+    #[cfg(windows)]
+    {
+        return _app
+            .get_webview_window("main")?
+            .hwnd()
+            .ok()
+            .map(|hwnd| WindowId(hwnd.0 as usize as u64));
+    }
+    #[cfg(not(windows))]
+    None
+}
+
 #[tauri::command]
 async fn get_profile(state: State<'_, Mutex<AppState>>) -> Result<Profile, String> {
     Ok(lock(&state)?.engine.profile.clone())
@@ -304,15 +326,14 @@ fn protect_all(
     mode: ProtectionMode,
 ) -> Result<TickReport, String> {
     let mut state = lock(&state)?;
-    let own_pid = std::process::id();
-    let windows: Vec<_> = state
-        .engine
-        .backend
-        .list_windows()?
-        .into_iter()
-        .filter(|window| window.pid != own_pid)
+    let windows = state.engine.backend.list_windows()?;
+    // The dashboard is opt-in: bulk Strict Hide must not hide the controls.
+    let other_windows: Vec<_> = windows
+        .iter()
+        .filter(|window| window.pid != std::process::id())
+        .cloned()
         .collect();
-    state.engine.profile.protect_all(&windows, mode);
+    state.engine.profile.protect_all(&other_windows, mode);
     state.armed = true;
     state.paused = false;
     let reconcile = plan(&state.engine.profile, &windows, &state.engine.applied());
@@ -588,12 +609,25 @@ async fn preview(
     live_only: Option<bool>,
 ) -> Result<SurfacePreview, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        if window.is_minimized().unwrap_or(false) || !window.is_visible().unwrap_or(false) {
+        if window
+            .is_minimized()
+            .map_err(|err| format!("Could not check whether the preview is minimized: {err}"))?
+            || !window
+                .is_visible()
+                .map_err(|err| format!("Could not check preview visibility: {err}"))?
+        {
             return Err("Capture paused while this window is hidden.".into());
         }
         let state = app.state::<Mutex<AppState>>();
         render_preview(
             state.inner(),
+            // The dashboard preview cannot capture itself. The share window
+            // can include the dashboard when the dashboard's rule permits it.
+            if window.label() == "surface" {
+                dashboard_id(&app)
+            } else {
+                None
+            },
             monitor.as_deref(),
             motion.unwrap_or(false),
             live_only.unwrap_or(false),
@@ -757,6 +791,7 @@ mod surface_tests {
 
 fn render_preview(
     state: &Mutex<AppState>,
+    dashboard: Option<WindowId>,
     monitor: Option<&str>,
     motion: bool,
     live_only: bool,
@@ -841,11 +876,7 @@ fn render_preview(
 
     // Composited X11 excludes our windows inside the capture; Wayland's
     // screencopy sees the whole output, so its own windows are veiled out.
-    let own_windows = if state.engine.backend.capture_includes_own_windows() {
-        state.engine.backend.own_windows()
-    } else {
-        Vec::new()
-    };
+    let own_windows = own_capture_masks(&state.engine.backend, dashboard);
     let region = if state.info.platform == veil_core::Platform::LinuxWayland && state.info.live {
         Some(
             selected
@@ -875,8 +906,7 @@ fn render_preview(
         let latest_targets = surface_targets(&state.engine, state.armed, state.paused, &latest);
         if !mask_geometry_stable(&windows, &surface, &latest, &latest_targets)
             || displays(&state.engine.backend)? != outputs
-            || (state.engine.backend.capture_includes_own_windows()
-                && state.engine.backend.own_windows() != own_windows)
+            || own_capture_masks(&state.engine.backend, dashboard) != own_windows
         {
             return Err("Protected windows changed during capture; retrying.".into());
         }
@@ -910,7 +940,7 @@ fn render_preview(
             }
         }
     }
-    for own in own_windows {
+    for (_, own) in own_windows {
         plan = plan.exclude(offset(own));
     }
     veil_surface::apply_exclusions(&mut source_frame, &plan);
@@ -926,6 +956,27 @@ fn render_preview(
         (f64::from(crop.h) * scale).max(1.0) as u32,
     );
     surface_preview(&frame, masked, source_label, armed)
+}
+
+fn own_capture_masks(
+    backend: &DesktopBackend,
+    dashboard: Option<WindowId>,
+) -> Vec<(WindowId, Rect)> {
+    #[cfg(windows)]
+    if let DesktopBackend::Windows(win) = backend {
+        return win.capture_masks(dashboard);
+    }
+    let _ = dashboard;
+    if backend.capture_includes_own_windows() {
+        backend
+            .own_windows()
+            .into_iter()
+            .enumerate()
+            .map(|(index, bounds)| (WindowId(index as u64), bounds))
+            .collect()
+    } else {
+        Vec::new()
+    }
 }
 
 fn sample_frame(source: &Frame, crop: Rect, width: u32, height: u32) -> Frame {
@@ -1152,9 +1203,18 @@ fn toggle_now(app: &tauri::AppHandle) {
 
 /// Background reconciliation so rules follow windows opened after startup and
 /// auto-arm reacts when a capture app appears or disappears.
-fn start_auto_monitor(app: tauri::AppHandle) {
+fn start_auto_monitor(app: tauri::AppHandle, events: std::sync::mpsc::Receiver<()>, native: bool) {
     std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_millis(2000));
+        // The slow safety sweep also recovers missed notifications and keeps
+        // automation working if an event source disconnects mid-session.
+        let signaled = events
+            .recv_timeout(Duration::from_secs(if native { 15 } else { 2 }))
+            .is_ok();
+        if signaled {
+            std::thread::sleep(Duration::from_millis(55));
+            while events.try_recv().is_ok() {}
+            let _ = app.emit("veil://windows", ());
+        }
         let Some(state) = app.try_state::<Mutex<AppState>>() else {
             continue;
         };
@@ -1207,13 +1267,17 @@ fn open_surface_window(app: &tauri::AppHandle) -> Result<(), String> {
         let _ = window.set_focus();
         return Ok(());
     }
-    tauri::WebviewWindowBuilder::new(app, "surface", tauri::WebviewUrl::App("index.html".into()))
-        .title("OmniScreenVeil Surface")
-        .inner_size(960.0, 600.0)
-        .min_inner_size(480.0, 320.0)
-        .background_color(tauri::window::Color(11, 13, 18, 255))
-        .build()
-        .map_err(|err| err.to_string())?;
+    tauri::WebviewWindowBuilder::new(
+        app,
+        "surface",
+        tauri::WebviewUrl::App("surface.html".into()),
+    )
+    .title("OmniScreenVeil Surface")
+    .inner_size(960.0, 600.0)
+    .min_inner_size(480.0, 320.0)
+    .background_color(tauri::window::Color(11, 13, 18, 255))
+    .build()
+    .map_err(|err| err.to_string())?;
     Ok(())
 }
 
@@ -1423,6 +1487,7 @@ pub fn run() {
             capabilities,
             capability_matrix,
             inventory,
+            native_window_events,
             mac_permission,
             get_profile,
             add_app_rule,
@@ -1444,6 +1509,9 @@ pub fn run() {
             preferences::get_preferences,
             preferences::save_preferences,
             preferences::login_startup,
+            stream::open_stream,
+            stream::next_stream_frame,
+            stream::close_stream,
             check_update,
             install_update,
             restart_app,
@@ -1471,7 +1539,14 @@ pub fn run() {
             app.manage(preferences::PreferenceStore::new(
                 store.with_file_name("desktop-settings.json"),
             ));
+            app.manage(stream::Sessions::default());
             let (mut backend, info) = DesktopBackend::detect();
+            #[cfg(windows)]
+            if let (DesktopBackend::Windows(win), Some(id)) =
+                (&mut backend, dashboard_id(app.handle()))
+            {
+                win.register_dashboard(id);
+            }
             let recovery =
                 RecoveryJournal::new(store.parent().unwrap_or_else(|| std::path::Path::new(".")));
             let recovered = recover_previous_session(&mut backend, &recovery);
@@ -1614,10 +1689,28 @@ pub fn run() {
                 eprintln!("veil: Ctrl+Shift+V is unavailable ({err}); use the tray or the UI");
             }
 
-            start_auto_monitor(app.handle().clone());
+            let platform = app
+                .state::<Mutex<AppState>>()
+                .lock()
+                .map(|state| state.info.platform)
+                .unwrap_or_else(|_| veil_core::Platform::detect());
+            let (signal, events) = std::sync::mpsc::sync_channel(1);
+            let native = window_events::start(platform, signal.clone());
+            app.manage(NativeWindowEvents(native));
+            // Keep a sender alive even if the watcher exits or is unsupported.
+            app.manage(signal);
+            start_auto_monitor(app.handle().clone(), events, native);
             Ok(())
         })
         .on_window_event(|window, event| {
+            #[cfg(windows)]
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                let app = window.app_handle().clone();
+                let label = window.label().to_owned();
+                tauri::async_runtime::spawn_blocking(move || {
+                    stream::remove_label(&app, &label, None)
+                });
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
                     api.prevent_close();

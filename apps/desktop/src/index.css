@@ -100,6 +100,10 @@ button:disabled { cursor: not-allowed; }
 /* Focus ring */
 :focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
 .command-search, .command-search:focus-visible { outline: none; border: 0; box-shadow: none; }
+.spatial-dots {
+  background-image: radial-gradient(var(--color-border-strong) 1px, transparent 1px);
+  background-size: 14px 14px;
+}
 
 /* ---------------------------------------------------------------------------
    Utilities & motion

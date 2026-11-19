@@ -58,6 +58,8 @@ export default function App() {
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [rendering, setRendering] = useState(false);
   const previewRequest = useRef(0);
+  const previewInFlight = useRef(false);
+  const [previewRevision, setPreviewRevision] = useState(0);
   const refreshRequest = useRef(0);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -90,7 +92,7 @@ export default function App() {
       setProfile(nextProfile);
     } catch (err) {
       if (request === refreshRequest.current) {
-        setError(String(err));
+        if (!quiet || label === "initial") setError(String(err));
         if (!quiet) notify(`${label}: ${String(err)}`, "error");
       }
     }
@@ -103,20 +105,70 @@ export default function App() {
     setRendering(false);
   }, []);
 
-  async function renderPreview(monitor: string | null) {
+  const renderPreview = useCallback(async (monitor: string | null) => {
+    if (previewInFlight.current || document.hidden) return;
+    previewInFlight.current = true;
     const request = ++previewRequest.current;
-    setPreview(null);
     setPreviewError(null);
     setRendering(true);
     try {
       const frame = await api.preview(monitor);
       if (request === previewRequest.current) setPreview(frame);
     } catch (err) {
-      if (request === previewRequest.current) setPreviewError(String(err));
+      if (request === previewRequest.current) { setPreview(null); setPreviewError(String(err)); }
     } finally {
+      previewInFlight.current = false;
       if (request === previewRequest.current) setRendering(false);
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    if (page !== "overview") return;
+    const capture = () => { if (!document.hidden) void renderPreview(null); };
+    capture();
+    const timer = window.setInterval(capture, 2500);
+    window.addEventListener("focus", capture);
+    document.addEventListener("visibilitychange", capture);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", capture);
+      document.removeEventListener("visibilitychange", capture);
+      invalidatePreview();
+    };
+  }, [page, previewRevision, invalidatePreview, renderPreview]);
+
+  useEffect(() => {
+    let pending = false;
+    let queued = false;
+    let alive = true;
+    let stop: (() => void) | undefined;
+    let timer: number | undefined;
+    const scan = async () => {
+      if (!alive || document.hidden) return;
+      if (pending) { queued = true; return; }
+      pending = true;
+      try { await refresh("automatic", true); }
+      finally {
+        pending = false;
+        if (queued) { queued = false; void scan(); }
+      }
+    };
+    if (!api.IN_TAURI) return;
+    void (async () => {
+      let native = false;
+      try {
+        native = await api.nativeWindowEvents();
+        const unlisten = await listen("veil://windows", () => void scan());
+        if (!alive) { unlisten(); return; }
+        stop = unlisten;
+      } catch { native = false; }
+      if (alive) timer = window.setInterval(() => { if (document.hasFocus()) void scan(); }, native ? 15000 : 2000);
+    })();
+    const focused = () => void scan();
+    window.addEventListener("focus", focused);
+    document.addEventListener("visibilitychange", focused);
+    return () => { alive = false; stop?.(); window.clearInterval(timer); window.removeEventListener("focus", focused); document.removeEventListener("visibilitychange", focused); };
+  }, [refresh]);
 
   const refreshPermissions = useCallback(() => { void refresh("permissions", true); }, [refresh]);
 
@@ -146,6 +198,7 @@ export default function App() {
     void (async () => {
       const stop = await listen("veil://changed", () => {
         invalidatePreview();
+        setPreviewRevision((r) => r + 1);
         void refresh("event", true);
       });
       if (cancelled) stop();
@@ -294,7 +347,7 @@ export default function App() {
     { id: "arm", label: isArmed ? "Disarm protection" : "Arm protection", group: "Protection", icon: isArmed ? ShieldOff : Shield, keywords: "toggle veil shield", run: toggleArm },
     { id: "protect-all", label: "Protect all windows", group: "Protection", icon: Sparkles, keywords: "bulk select everything", run: () => { void protectAllWindows(); } },
     { id: "open-surface", label: "Open Surface window", group: "Protection", icon: PanelsTopLeft, keywords: "share screen", run: () => { void api.openSurface().catch((e) => notify(String(e), "error")); } },
-    { id: "refresh", label: "Refresh inventory", group: "Verification", icon: RefreshCw, shortcut: `${MOD}R`, run: () => { void refresh(); } },
+    { id: "refresh", label: "Refresh windows", group: "Verification", icon: RefreshCw, shortcut: `${MOD}R`, run: () => { void refresh(); } },
     { id: "theme", label: `Switch to ${theme === "dark" ? "light" : "dark"} theme`, group: "Preferences", icon: theme === "dark" ? Sun : Moon, shortcut: `${MOD}D`, run: toggleTheme },
     { id: "updates", label: "Check for updates", group: "Preferences", icon: Download, keywords: "upgrade release stable beta", run: () => { setPage("updates"); void updater.check("manual"); } },
     { id: "shortcuts", label: "Show keyboard shortcuts", group: "Preferences", icon: CircleHelp, keywords: "help keys", run: () => setPaletteOpen(true) },
@@ -396,6 +449,7 @@ export default function App() {
                 profile={profile}
                 caps={caps}
                 preview={preview}
+                previewError={previewError}
                 busy={busy !== null}
                 backend={inv?.backend ?? null}
                 onNavigate={(p) => setPage(p)}
@@ -426,7 +480,9 @@ export default function App() {
                 preview={preview}
                 error={previewError}
                 busy={busy !== null || rendering}
-                onRender={(monitor) => void renderPreview(monitor)}
+                onRender={renderPreview}
+                revision={previewRevision}
+                platform={caps?.platform}
                 onDisplayChange={invalidatePreview}
                 onOpen={() => { void api.openSurface().catch((e) => notify(String(e), "error")); }}
               />

@@ -151,7 +151,7 @@ export interface Display {
 
 export interface DesktopPreferences {
   close_behavior: "quit" | "minimize";
-  preview_mode: "economy" | "motion" | "manual";
+  preview_mode: "economy" | "motion" | "manual" | "native";
 }
 
 export const MODES: {

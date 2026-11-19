@@ -42,14 +42,6 @@ export function SettingsPage({ theme, onToggleTheme }: { theme: Theme; onToggleT
         </select>
       </label>
       <label className="flex items-center justify-between gap-4 py-3">
-        <span>Surface playback <small className="block text-muted">Faster uses smaller frames. All modes pause when the Surface is minimized.</small></span>
-        <select className={selectClass} disabled={!prefs || busy} value={prefs?.preview_mode ?? "economy"} onChange={(e) => prefs && void save({ ...prefs, preview_mode: e.target.value as DesktopPreferences["preview_mode"] })}>
-          <option value="economy">Snapshots · up to 1920 px</option>
-          <option value="motion">Faster preview · up to 960 px</option>
-          <option value="manual">Manual refresh</option>
-        </select>
-      </label>
-      <label className="flex items-center justify-between gap-4 py-3">
         <span>Dark appearance</span>
         <Switch checked={theme === "dark"} onCheckedChange={onToggleTheme} aria-label="Dark appearance" />
       </label>

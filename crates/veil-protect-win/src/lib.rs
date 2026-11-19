@@ -90,12 +90,26 @@ impl WinBackend {
     pub fn own_windows(&self) -> Vec<veil_core::Rect> {
         #[cfg(windows)]
         {
-            self.inner.own_windows()
+            self.inner
+                .own_windows(None)
+                .into_iter()
+                .map(|(_, bounds)| bounds)
+                .collect()
         }
         #[cfg(not(windows))]
         {
             Vec::new()
         }
+    }
+
+    #[cfg(windows)]
+    pub fn capture_masks(&self, reveal: Option<WindowId>) -> Vec<(WindowId, veil_core::Rect)> {
+        self.inner.capture_masks(reveal)
+    }
+
+    #[cfg(windows)]
+    pub fn register_dashboard(&mut self, id: WindowId) {
+        self.inner.dashboard = Some(id);
     }
 }
 
@@ -168,6 +182,9 @@ pub fn is_shell_class(class_name: &str) -> bool {
 }
 
 #[cfg(windows)]
+pub mod stream;
+
+#[cfg(windows)]
 mod win {
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
@@ -185,7 +202,7 @@ mod win {
     use windows_sys::Win32::Graphics::Gdi::{
         BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, EnumDisplayMonitors,
         GetDC, GetMonitorInfoW, GetObjectW, ReleaseDC, SelectObject, BITMAP, BITMAPINFO,
-        BITMAPINFOHEADER, DIB_RGB_COLORS, HDC, HMONITOR, MONITORINFOEXW, SRCCOPY,
+        BITMAPINFOHEADER, CAPTUREBLT, DIB_RGB_COLORS, HDC, HMONITOR, MONITORINFOEXW, SRCCOPY,
     };
     use windows_sys::Win32::Security::{
         AdjustTokenPrivileges, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
@@ -207,10 +224,10 @@ mod win {
         DestroyIcon, EnumChildWindows, EnumWindows, GetClassNameW, GetIconInfo, GetSystemMetrics,
         GetWindow, GetWindowDisplayAffinity, GetWindowLongW, GetWindowRect, GetWindowTextW,
         GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, RemovePropW, SetPropW,
-        SetWindowDisplayAffinity, ShowWindow, GWL_EXSTYLE, GW_OWNER, HICON, ICONINFO, SM_CXSCREEN,
-        SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-        SW_HIDE, SW_SHOW, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
-        WS_EX_TOOLWINDOW,
+        SetWindowDisplayAffinity, ShowWindow, ShowWindowAsync, GWL_EXSTYLE, GW_OWNER, HICON,
+        ICONINFO, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
+        SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOW, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
+        WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     };
 
     use veil_core::geometry::Rect;
@@ -636,6 +653,7 @@ mod win {
     }
 
     pub struct Inner {
+        pub(super) dashboard: Option<WindowId>,
         injected: BTreeSet<u32>,
         /// window -> (pid, mode) so release knows what to undo and strict-hidden
         /// windows stay in the inventory.
@@ -646,6 +664,7 @@ mod win {
         pub fn new() -> Result<Self, WinError> {
             enable_debug_privilege();
             Ok(Self {
+                dashboard: None,
                 injected: BTreeSet::new(),
                 protected: BTreeMap::new(),
             })
@@ -662,7 +681,7 @@ mod win {
             // `IsWindowVisible` is now false for them; otherwise reconcile
             // would think the window closed and immediately release/re-show it!
             for (&win_id, &(pid, mode)) in &self.protected {
-                if mode != ProtectionMode::StrictHide {
+                if mode != ProtectionMode::StrictHide || Some(win_id) == self.dashboard {
                     continue;
                 }
                 if raw.iter().any(|w| w.hwnd as usize as u64 == win_id.0) {
@@ -734,13 +753,40 @@ mod win {
                     icon,
                 });
             }
+            out.extend(self.dashboard.and_then(|id| self.dashboard(id, icons)));
             out.sort_by_key(|w| w.id);
             Ok(out)
         }
 
-        pub fn own_windows(&self) -> Vec<Rect> {
+        pub fn dashboard(&self, id: WindowId, icons: bool) -> Option<WindowInfo> {
+            let (x, y, _, _) = unsafe { virtual_screen_rect() };
+            let hwnd = id.0 as usize as HWND;
+            let mut pid = 0;
+            unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+            if pid != std::process::id() {
+                return None;
+            }
+            let bounds = unsafe { window_visible_bounds(hwnd) }?.translated(-x, -y);
+            let exe = std::env::current_exe().ok()?.to_string_lossy().into_owned();
+            Some(WindowInfo {
+                id,
+                pid,
+                app: AppKey::WindowsExecutable(normalize_exe(&exe)),
+                app_name: "OmniScreenVeil".into(),
+                title: "Dashboard".into(),
+                bounds,
+                monitor: None,
+                visible: unsafe { IsWindowVisible(hwnd) != 0 },
+                minimized: unsafe { IsIconic(hwnd) != 0 },
+                top_level: true,
+                platform: Platform::Windows,
+                icon: if icons { app_icon(&exe) } else { String::new() },
+            })
+        }
+
+        pub fn own_windows(&self, reveal: Option<WindowId>) -> Vec<(WindowId, Rect)> {
             unsafe extern "system" fn own_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
-                let out = &mut *(lparam as *mut Vec<Rect>);
+                let out = &mut *(lparam as *mut Vec<(WindowId, Rect)>);
                 if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 {
                     return TRUE;
                 }
@@ -750,18 +796,44 @@ mod win {
                     return TRUE;
                 }
                 if let Some(bounds) = window_visible_bounds(hwnd) {
-                    out.push(bounds);
+                    out.push((WindowId(hwnd as usize as u64), bounds));
                 }
                 TRUE
             }
             let (vx, vy, _, _) = unsafe { virtual_screen_rect() };
-            let mut raw: Vec<Rect> = Vec::new();
+            let mut raw: Vec<(WindowId, Rect)> = Vec::new();
             unsafe {
                 EnumWindows(Some(own_cb), &mut raw as *mut _ as LPARAM);
             }
-            raw.into_iter()
-                .map(|r| Rect::new(r.x - vx, r.y - vy, r.w, r.h))
-                .collect()
+            raw.retain(|(id, _)| Some(*id) != reveal);
+            for (_, rect) in &mut raw {
+                *rect = rect.translated(-vx, -vy);
+            }
+            raw.sort_by_key(|(id, _)| *id);
+            raw
+        }
+
+        pub fn capture_masks(&self, reveal: Option<WindowId>) -> Vec<(WindowId, Rect)> {
+            let mut masks = self.own_windows(reveal);
+            if let Some(dashboard) = self.dashboard {
+                // A successful native exclusion leaves the desktop behind the
+                // dashboard visible. Don't replace that area with a Surface
+                // mask. Keep the anti-recursion mask if affinity is lost or
+                // unsupported. All other app-owned windows remain masked.
+                if matches!(
+                    self.protected.get(&dashboard),
+                    Some((_, ProtectionMode::Exclusion))
+                ) {
+                    let mut affinity = WDA_NONE;
+                    let hwnd = dashboard.0 as usize as HWND;
+                    if unsafe { GetWindowDisplayAffinity(hwnd, &mut affinity) } != 0
+                        && affinity == WDA_EXCLUDEFROMCAPTURE
+                    {
+                        masks.retain(|(id, _)| *id != dashboard);
+                    }
+                }
+            }
+            masks
         }
 
         pub fn capture_root(&self) -> Result<Frame, WinError> {
@@ -819,7 +891,7 @@ mod win {
                     screen_dc,
                     vx,
                     vy,
-                    SRCCOPY,
+                    SRCCOPY | CAPTUREBLT,
                 );
                 SelectObject(mem_dc, old);
                 DeleteDC(mem_dc);
@@ -1073,7 +1145,13 @@ mod win {
                 },
                 ProtectionMode::StrictHide => {
                     unsafe {
-                        ShowWindow(hwnd, SW_HIDE);
+                        if Some(intent.window) == self.dashboard {
+                            if ShowWindowAsync(hwnd, SW_HIDE) == 0 {
+                                return Err(last_error("ShowWindowAsync"));
+                            }
+                        } else {
+                            ShowWindow(hwnd, SW_HIDE);
+                        }
                     }
                     self.protected
                         .insert(intent.window, (intent.pid, ProtectionMode::StrictHide));
@@ -1094,7 +1172,13 @@ mod win {
                 }
                 match mode {
                     ProtectionMode::StrictHide => {
-                        ShowWindow(hwnd, SW_SHOW);
+                        if Some(window) == self.dashboard {
+                            if ShowWindowAsync(hwnd, SW_SHOW) == 0 {
+                                return Err(last_error("ShowWindowAsync"));
+                            }
+                        } else {
+                            ShowWindow(hwnd, SW_SHOW);
+                        }
                     }
                     ProtectionMode::Exclusion => {
                         let prop = wide(PROTECTED_PROP);

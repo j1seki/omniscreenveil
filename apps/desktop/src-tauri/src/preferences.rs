@@ -18,6 +18,7 @@ pub enum PreviewMode {
     #[default]
     Economy,
     Motion,
+    Native,
     Manual,
 }
 

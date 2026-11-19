@@ -2,6 +2,7 @@
 **/target
 node_modules
 dist
+/apps/desktop/dist-pages/
 .DS_Store
 *.log
 /tmp

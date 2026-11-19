@@ -120,7 +120,7 @@ export function Sidebar({
       {/* App identity */}
       <div className="flex h-14 items-center gap-2.5 px-4">
         <div className="flex size-7 items-center justify-center rounded-lg border border-border-strong bg-elevated shadow-sm">
-          <img src="/veil-mark.svg" alt="" className="size-6" />
+          <img src="./veil-mark.svg" alt="" className="size-6" />
         </div>
         <div className="min-w-0 flex-1">
           <p className="truncate text-[13px] font-semibold tracking-tight text-text">

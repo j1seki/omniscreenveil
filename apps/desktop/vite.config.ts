@@ -13,6 +13,7 @@ export default defineConfig({
   },
   envPrefix: ["VITE_", "TAURI_"],
   build: {
+    rollupOptions: { input: { dashboard: "index.html", surface: "surface.html" } },
     target: "es2021",
     minify: process.env.TAURI_ENV_DEBUG ? false : "esbuild",
     sourcemap: Boolean(process.env.TAURI_ENV_DEBUG),

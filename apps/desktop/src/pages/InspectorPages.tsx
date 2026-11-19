@@ -12,6 +12,7 @@ import type {
   AppKey,
   Capabilities,
   Display,
+  DesktopPreferences,
   Profile,
   ProtectionMode,
   SurfacePreview,
@@ -32,6 +33,8 @@ export function SurfacePage({
   onRender,
   onDisplayChange,
   onOpen,
+  revision,
+  platform,
 }: {
   preview: SurfacePreview | null;
   error: string | null;
@@ -39,20 +42,34 @@ export function SurfacePage({
   onRender: (display: string | null) => void;
   onDisplayChange: () => void;
   onOpen: () => void;
+  revision: number;
+  platform?: Capabilities["platform"];
 }) {
   const [outputs, setOutputs] = useState<Display[]>([]);
   const [display, setDisplay] = useState<string | null>(null);
   useEffect(() => { void api.surfaceDisplays().then(setOutputs, () => {}); }, []);
-  useEffect(() => { onDisplayChange(); }, [onDisplayChange]);
+  useEffect(() => {
+    const render = () => { if (!document.hidden) onRender(display); };
+    render();
+    const timer = window.setInterval(render, 2000);
+    window.addEventListener("focus", render);
+    document.addEventListener("visibilitychange", render);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", render);
+      document.removeEventListener("visibilitychange", render);
+      onDisplayChange();
+    };
+  }, [display, onRender, onDisplayChange, revision]);
   return (
     <div className="animate-page-in space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-[14px] font-semibold text-text">Live compositor preview</h2>
           <p className="mt-0.5 text-[12px] text-muted">
             {preview
               ? `${preview.width}×${preview.height} · ${preview.masked} windows or regions covered · ${preview.source}`
-              : "Render a frame to check what the audience will see. The share window has its own display picker."}
+              : "Waiting for a preview. Use the controls below to set playback for the share window."}
           </p>
         </div>
         <div className="flex gap-2">
@@ -61,12 +78,14 @@ export function SurfacePage({
             <RefreshCw className={cn("size-3.5", busy && "animate-spin")} />
             {preview ? "Re-render" : "Render preview"}
           </Button>
-          <Button size="sm" onClick={onOpen} disabled={busy} title="Open the shareable Surface window" className="h-8 text-[12px]">
+          <Button size="sm" onClick={onOpen} title="Open the shareable Surface window" className="h-8 text-[12px]">
             <ExternalLink className="size-3.5" />
             Open Surface window
           </Button>
         </div>
       </div>
+
+      <SurfacePlayback nativeAvailable={platform === "windows" && api.IN_TAURI} />
 
       {error && <p role="alert" className="rounded-lg border border-danger/30 bg-panel p-3 text-sm text-danger">{error}</p>}
 
@@ -125,6 +144,36 @@ export function SurfacePage({
       </div>
     </div>
   );
+}
+
+function SurfacePlayback({ nativeAvailable }: { nativeAvailable: boolean }) {
+  const [prefs, setPrefs] = useState<DesktopPreferences | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => { void api.getPreferences().then(setPrefs, (err) => setError(String(err))); }, []);
+
+  async function change(preview_mode: DesktopPreferences["preview_mode"]) {
+    if (!prefs) return;
+    const next = { ...prefs, preview_mode };
+    setSaving(true);
+    setError(null);
+    try { await api.savePreferences(next); setPrefs(next); }
+    catch (err) { setError(String(err)); }
+    finally { setSaving(false); }
+  }
+
+  return <section className="rounded-xl border border-border bg-panel p-3">
+    <label className="flex flex-wrap items-center justify-between gap-2 text-xs">
+      <span><strong className="text-text">Surface playback</strong><small className="mt-1 block text-muted">For the separate share window. {nativeAvailable ? "Native streaming uses one display. " : ""}Playback pauses when minimized.</small></span>
+      <select className="rounded-md border border-border bg-app px-2.5 py-1.5 text-text" value={prefs?.preview_mode ?? "economy"} disabled={!prefs || saving} onChange={(e) => void change(e.target.value as DesktopPreferences["preview_mode"])}>
+        <option value="economy">Snapshots · up to 1920 px</option>
+        <option value="motion">Faster snapshots · up to 960 px</option>
+        {(nativeAvailable || prefs?.preview_mode === "native") && <option value="native" disabled={!nativeAvailable}>Native stream (Windows) · up to 960 px</option>}
+        <option value="manual">Manual refresh</option>
+      </select>
+    </label>
+    {error && <p role="alert" className="mt-2 text-xs text-danger">{error}</p>}
+  </section>;
 }
 
 export function AuditPage({ armed, live }: { armed: boolean; live: boolean }) {
@@ -205,7 +254,7 @@ export function RulesPage({
 }) {
   const rules = profile?.rules ?? [];
   const active = profile?.auto_arm ?? "off";
-  const apps = [...new Map(windows.map((w) => [w.app.value.toLowerCase(), w])).values()].sort((a, b) => a.app_name.localeCompare(b.app_name));
+  const apps = [...new Map(windows.filter((w) => w.top_level).map((w) => [w.app.value.toLowerCase(), w])).values()].sort((a, b) => a.app_name.localeCompare(b.app_name));
   const [selection, setSelection] = useState("");
   const [identity, setIdentity] = useState("");
   const [mode, setMode] = useState<ProtectionMode>("surface");

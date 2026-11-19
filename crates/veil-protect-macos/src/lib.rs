@@ -37,6 +37,10 @@ pub struct MacBackend {
 }
 
 impl MacBackend {
+    #[cfg(target_os = "macos")]
+    pub fn watch_windows(signal: std::sync::mpsc::SyncSender<()>) -> bool {
+        ffi::watch_windows(signal)
+    }
     pub fn new() -> Result<Self, MacError> {
         #[cfg(target_os = "macos")]
         {
@@ -219,6 +223,7 @@ mod ffi {
 
     #[link(name = "VeilMac", kind = "static")]
     extern "C" {
+        fn veil_macos_watch_windows(callback: extern "C" fn());
         fn veil_macos_hide_window(window: u64) -> i32;
         fn veil_macos_show_window(window: u64) -> i32;
         fn veil_macos_last_error() -> *mut c_char;
@@ -238,6 +243,23 @@ mod ffi {
             out_height: *mut u32,
         ) -> *mut u8;
         fn veil_macos_free_buffer(ptr: *mut u8);
+    }
+
+    pub(super) fn watch_windows(signal: std::sync::mpsc::SyncSender<()>) -> bool {
+        static SIGNAL: std::sync::OnceLock<std::sync::mpsc::SyncSender<()>> =
+            std::sync::OnceLock::new();
+        extern "C" fn notify() {
+            if let Some(signal) = SIGNAL.get() {
+                let _ = signal.try_send(());
+            }
+        }
+        if SIGNAL.set(signal).is_err() {
+            return false;
+        }
+        unsafe { veil_macos_watch_windows(notify) };
+        // Without Accessibility, workspace events still work but cannot detect
+        // every window created by a running app. Keep the faster fallback.
+        unsafe { veil_macos_accessibility_trusted() != 0 }
     }
 
     pub fn screen_recording_granted() -> bool {

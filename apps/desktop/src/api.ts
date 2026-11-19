@@ -455,10 +455,22 @@ export async function preview(monitor: string | null = null, motion = false, liv
   return invoke<SurfacePreview>("preview", { monitor, motion, liveOnly });
 }
 
+export function openStream(monitor: string | null): Promise<number> {
+  return invoke("open_stream", { monitor });
+}
+
+export function nextStreamFrame(id: number): Promise<ArrayBuffer> {
+  return invoke("next_stream_frame", { id });
+}
+
+export function closeStream(id: number): Promise<void> {
+  return invoke("close_stream", { id });
+}
+
 export async function openSurface(): Promise<void> {
   if (!IN_TAURI) {
     window.open(
-      `${window.location.pathname}?surface=1`,
+      new URL("surface.html", window.location.href).href,
       "_blank",
       "width=960,height=600",
     );
@@ -474,6 +486,10 @@ export async function closeSurface(): Promise<void> {
 
 export async function surfaceDisplays(): Promise<Display[]> {
   return IN_TAURI ? invoke("surface_displays") : [];
+}
+
+export async function nativeWindowEvents(): Promise<boolean> {
+  return IN_TAURI && invoke<boolean>("native_window_events");
 }
 
 export async function getPreferences(): Promise<DesktopPreferences> {

@@ -58,6 +58,7 @@ export function OverviewPage({
   profile,
   caps,
   preview,
+  previewError,
   busy,
   backend,
   onNavigate,
@@ -67,6 +68,7 @@ export function OverviewPage({
   profile: Profile | null;
   caps: Capabilities | null;
   preview: SurfacePreview | null;
+  previewError: string | null;
   busy: boolean;
   backend: BackendInfo | null;
   onNavigate: (page: "windows" | "surface" | "audit" | "capabilities") => void;
@@ -181,7 +183,7 @@ export function OverviewPage({
                 <button
                   key={win.id}
                   type="button"
-                  disabled={busy}
+                  disabled={busy || !win.top_level}
                   onClick={() => onToggleWindow(win)}
                   title={rule ? "Remove the saved protection rule" : "Add a protection rule for this app"}
                   className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-hover/60"
@@ -211,7 +213,7 @@ export function OverviewPage({
             <div>
               <h3 className="text-[13px] font-semibold text-text">Veil Surface</h3>
               <p className="mt-0.5 text-[11px] text-faint">
-                {preview ? `${preview.masked} masked · ${preview.source}` : "No frame yet"}
+                {preview ? `${preview.masked} masked · ${preview.source}` : previewError ? "Preview unavailable" : "Waiting for the first frame…"}
               </p>
             </div>
             <button
@@ -230,8 +232,8 @@ export function OverviewPage({
                 className="size-full object-contain"
               />
             ) : (
-              <div className="flex h-full items-center justify-center font-mono text-[11px] text-faint">
-                [ NO FRAME ]
+              <div className="flex h-full items-center justify-center px-4 text-center text-xs text-muted" role="status">
+                {previewError ?? "Loading Surface preview…"}
               </div>
             )}
           </div>

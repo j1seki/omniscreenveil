@@ -1,4 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import * as api from "../api";
+import { ProtectionModesGuide } from "../components/ProtectionModesGuide";
 import {
   Map as MapIcon,
   Monitor,
@@ -11,6 +13,7 @@ import {
 import type {
   AppliedProtection,
   Capabilities,
+  Display,
   Inventory,
   Profile,
   ProtectionMode,
@@ -75,6 +78,13 @@ export function WindowsPage({
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
   const [showRadar, setShowRadar] = useState(true);
+  const [displays, setDisplays] = useState<Display[]>([]);
+  useEffect(() => {
+    const load = () => void api.surfaceDisplays().then(setDisplays, () => {});
+    load();
+    window.addEventListener("focus", load);
+    return () => window.removeEventListener("focus", load);
+  }, []);
   const [showUtility, setShowUtility] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const isMac = caps?.platform === "mac_os";
@@ -150,7 +160,7 @@ export function WindowsPage({
             disabled={busy}
             className="h-8 rounded-md border border-border bg-panel px-2.5 text-[12px] text-muted transition-colors hover:border-border-strong hover:text-text disabled:opacity-50"
           >
-            Refresh
+            Refresh windows
           </button>
           <button
             type="button"
@@ -174,6 +184,8 @@ export function WindowsPage({
         <SpatialRadar
           inventory={{ ...inventory, windows: inventory.windows.filter((w) => showUtility || !isUtility(w) || Boolean(findRuleForWindow(profile, w))) }}
           profile={profile}
+          displays={displays}
+          busy={busy}
           onSelectWindow={onToggle}
         />
       )}
@@ -183,6 +195,7 @@ export function WindowsPage({
       </div>}
 
       {/* Table */}
+      <ProtectionModesGuide caps={caps} />
       <div className="overflow-hidden rounded-xl border border-border bg-panel">
         <div className="flex flex-wrap items-center gap-3 border-b border-border px-4 py-3">
           <div className="relative min-w-[220px] flex-1">

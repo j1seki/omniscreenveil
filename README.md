@@ -2,6 +2,8 @@
 
 Selective screen-capture privacy for Windows, macOS and Linux.
 
+[Project website and browser demo](https://j1seki.github.io/omniscreenveil/) · [Downloads and prereleases](https://github.com/j1seki/omniscreenveil/releases)
+
 ![Earlier OmniScreenVeil dark-mode walkthrough](docs/images/app-dark-demo.gif)
 
 Pick which windows you want to keep out of a share, then open and share the
@@ -227,6 +229,12 @@ of silent success.
 
 ### Windows
 
+For the portable ZIP, quit OmniScreenVeil from the tray and run
+`Uninstall-OmniScreenVeil.cmd` from the extracted folder. It removes the executable
+and helper DLL, but keeps `app-data`. Windows can keep the helper DLL locked while
+another app that used Exclude is still running. Close that app, or restart Windows
+and run the uninstaller before reopening it. The script does not force-close apps.
+
 `Exclusion` injects `veil_hook_win.dll` into the process that owns the selected
 window. The main application marks windows with the
 `OmniScreenVeil.Protected` property; the helper applies
@@ -265,10 +273,18 @@ hide unmaps the window and restores it. All of these paths are proven in
 
 The desktop app provides an **Open Surface** action (and tray entry). Share
 that dedicated window rather than your desktop. Hover along its top edge to
-select all displays or one display, refresh, or close it. Settings offers
+select all displays or one display, refresh, or close it. The dashboard’s
+**Surface → Surface playback** controls offer
 periodic snapshots, up to five reduced-size frames per second (capture speed
-permitting), and manual refresh. This is not a native video stream. Surface
-capture pauses when its window is minimized.
+permitting), and manual refresh. On Windows, **Native stream** uses a persistent
+DXGI Desktop Duplication session for one selected display (up to 960 px, with a
+12 fps playback cap). Use snapshots for all displays together, rotated displays,
+or if your graphics adapter does not support duplication. Surface capture pauses
+when its window is minimized; the dashboard preview refreshes on Overview and
+Surface. On Windows, the dashboard has the same mode controls as other apps.
+An unprotected dashboard can appear in the separate share window, but never in
+its own embedded preview. If you choose Strict Hide for the dashboard, release
+protection from the tray menu to bring it back. The pop-out itself stays masked.
 
 To demonstrate or verify, stop any active share, choose a harmless test app,
 and set a Surface rule. Use **Capture test** to take real before/after frames

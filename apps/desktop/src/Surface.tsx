@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { RefreshCw, X } from "lucide-react";
 import * as api from "./api";
 import { DisplayPicker } from "./components/DisplayPicker";
+import { playNativeStream } from "./lib/nativeStream";
 import type { DesktopPreferences, Display } from "./types";
 
 export default function Surface() {
@@ -14,6 +15,10 @@ export default function Surface() {
   const [mode, setMode] = useState<DesktopPreferences["preview_mode"] | null>(null);
   const [revision, refresh] = useState(0);
   const inFlight = useRef<Promise<unknown> | null>(null);
+
+  useEffect(() => {
+    if (mode === "native" && !monitor && displays.length === 1) setMonitor(displays[0].id);
+  }, [mode, monitor, displays]);
 
   useEffect(() => {
     let active = true;
@@ -44,6 +49,25 @@ export default function Surface() {
 
   useEffect(() => {
     if (!mode) return;
+    if (mode === "native") {
+      let stop: (() => void) | undefined;
+      let active = true;
+      const sync = () => {
+        stop?.(); stop = undefined; setSrc(null);
+        if (document.hidden) return;
+        if (!monitor) { setMessage("Choose one display to start native streaming."); return; }
+        setMessage("Waiting for the first native frame…");
+        stop = playNativeStream(monitor, setSrc, (error) => {
+          stop = undefined;
+          if (active) setMessage(`${error} Use the dashboard’s Surface → Surface playback to switch to snapshots.`);
+        });
+      };
+      document.addEventListener("visibilitychange", sync);
+      const focus = () => { if (!stop && !document.hidden) sync(); };
+      window.addEventListener("focus", focus);
+      sync();
+      return () => { active = false; stop?.(); window.removeEventListener("focus", focus); document.removeEventListener("visibilitychange", sync); };
+    }
     let active = true;
     let epoch = 0;
     let minimized = false;
@@ -52,7 +76,7 @@ export default function Surface() {
       const began = performance.now();
       const version = epoch;
       try {
-        if (document.hidden || (api.IN_TAURI && await getCurrentWindow().isMinimized())) {
+        if (document.hidden || (api.IN_TAURI && await getCurrentWindow().isMinimized().catch(() => false))) {
           minimized = true;
           if (active) { setSrc(null); setMessage("Capture paused while minimized"); }
           return;
@@ -97,7 +121,7 @@ export default function Surface() {
 
   return <div className="surface">
     {src ? <img src={src} alt="Veil Surface capture" /> : <div className="surface-status px-8 text-center" role="status">{message}</div>}
-    <div className="absolute top-0 right-0 left-0 flex items-center justify-end gap-3 bg-black/85 px-3 py-2 text-white opacity-0 transition-opacity hover:opacity-100 focus-within:opacity-100">
+    <div className={`absolute top-0 right-0 left-0 flex items-center justify-end gap-3 bg-black/85 px-3 py-2 text-white transition-opacity hover:opacity-100 focus-within:opacity-100 ${src ? "opacity-0" : "opacity-100"}`}>
       <DisplayPicker displays={displays} value={monitor} onChange={(value) => { setSrc(null); setMessage("Switching displays…"); setMonitor(value); }} />
       <button type="button" title="Refresh the Surface frame" aria-label="Refresh the Surface frame" onClick={() => refresh((r) => r + 1)}><RefreshCw size={16} /></button>
       <button type="button" title="Close Surface (Esc)" aria-label="Close Surface" onClick={() => void api.closeSurface().catch((err) => setMessage(String(err)))}><X size={18} /></button>
