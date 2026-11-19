@@ -49,9 +49,9 @@ pub enum DesktopBackend {
 impl DesktopBackend {
     /// Detect the best backend for this machine, never failing.
     pub fn detect() -> (Self, BackendInfo) {
-        let detected = Platform::detect();
         #[cfg(target_os = "linux")]
         {
+            let detected = Platform::detect();
             if detected == Platform::LinuxX11 {
                 match X11Backend::connect() {
                     Ok(backend) => {
@@ -168,6 +168,7 @@ impl DesktopBackend {
 
         #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
         {
+            let detected = Platform::detect();
             (
                 Self::Simulated(MemoryBackend::new(detected)),
                 BackendInfo {

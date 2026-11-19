@@ -153,7 +153,37 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
-      - name: Build and notarize the macOS app and sign the DMG
+      - name: Check macOS signing secrets
+        id: macos_signing
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [[ -z "${!name}" ]]; then
+              missing=1
+            fi
+          done
+          if (( missing == 0 )); then
+            if [[ "$APPLE_SIGNING_IDENTITY" != 'Developer ID Application: '* ]]; then
+              echo "::error::APPLE_SIGNING_IDENTITY must be a Developer ID Application identity."
+              exit 1
+            fi
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Apple signing secrets are incomplete; building an ad-hoc signed, unnotarized DMG. Configure the secrets before public distribution."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the macOS app and sign or notarize the DMG
         if: runner.os == 'macOS'
         working-directory: apps/desktop/src-tauri
         shell: bash
@@ -169,22 +199,27 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
-          missing=0
-          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+          # GitHub passes missing secrets as empty strings, which Tauri treats as
+          # present. Drop them so the ad-hoc path does not try to import an empty
+          # certificate.
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+            APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
             if [[ -z "${!name}" ]]; then
-              echo "::error::Missing $name repository secret. See the macOS release instructions."
-              missing=1
+              unset "$name"
             fi
           done
-          (( missing == 0 )) || exit 1
-          if [[ "$APPLE_SIGNING_IDENTITY" != 'Developer ID Application: '* ]]; then
-            echo "::error::APPLE_SIGNING_IDENTITY must be a Developer ID Application identity."
-            exit 1
+          if [[ "${{ steps.macos_signing.outputs.signed }}" == "true" ]]; then
+            pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+          else
+            pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} \
+              --config '{"bundle":{"macOS":{"signingIdentity":"-"}}}'
+            bundle="target/${{ matrix.target }}/release/bundle"
+            test -d "$bundle/macos/OmniScreenVeil.app"
+            ls "$bundle/dmg"/*.dmg >/dev/null
           fi
-          pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
 
       - name: Notarize the DMG and verify the release artifacts
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && steps.macos_signing.outputs.signed == 'true'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}

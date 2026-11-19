@@ -2299,7 +2299,7 @@ dependencies = [
 
 [[package]]
 name = "omniscreenveil-desktop"
-version = "0.1.2-rc.1"
+version = "0.1.2"
 dependencies = [
  "base64 0.22.1",
  "png 0.17.16",
@@ -4291,7 +4291,7 @@ dependencies = [
 
 [[package]]
 name = "veil-canary"
-version = "0.1.2-rc.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "veil-core",
@@ -4300,7 +4300,7 @@ dependencies = [
 
 [[package]]
 name = "veil-core"
-version = "0.1.2-rc.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -4309,7 +4309,7 @@ dependencies = [
 
 [[package]]
 name = "veil-protect"
-version = "0.1.2-rc.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -4318,7 +4318,7 @@ dependencies = [
 
 [[package]]
 name = "veil-protect-linux"
-version = "0.1.2-rc.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -4331,7 +4331,7 @@ dependencies = [
 
 [[package]]
 name = "veil-protect-macos"
-version = "0.1.2-rc.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -4343,7 +4343,7 @@ dependencies = [
 
 [[package]]
 name = "veil-protect-wayland"
-version = "0.1.2-rc.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -4356,7 +4356,7 @@ dependencies = [
 
 [[package]]
 name = "veil-protect-win"
-version = "0.1.2-rc.1"
+version = "0.1.2"
 dependencies = [
  "base64 0.22.1",
  "png 0.17.16",
@@ -4369,7 +4369,7 @@ dependencies = [
 
 [[package]]
 name = "veil-surface"
-version = "0.1.2-rc.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -4378,7 +4378,7 @@ dependencies = [
 
 [[package]]
 name = "veil-verify"
-version = "0.1.2-rc.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
