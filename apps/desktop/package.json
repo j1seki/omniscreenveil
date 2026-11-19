@@ -1,7 +1,7 @@
 {
   "name": "omniscreenveil-desktop",
   "private": true,
-  "version": "0.1.4-rc.1",
+  "version": "0.1.4-rc.2",
   "type": "module",
   "scripts": {
     "dev": "vite --port 1420",
