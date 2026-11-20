@@ -1284,10 +1284,10 @@ mod win {
                         if owner_pid == 0 {
                             owner_pid = pid;
                         }
-                        if owner_pid == GetCurrentProcessId() {
-                            if SetWindowDisplayAffinity(hwnd, WDA_NONE) == 0 {
-                                return Err(last_error("SetWindowDisplayAffinity(WDA_NONE)"));
-                            }
+                        if owner_pid == GetCurrentProcessId()
+                            && SetWindowDisplayAffinity(hwnd, WDA_NONE) == 0
+                        {
+                            return Err(last_error("SetWindowDisplayAffinity(WDA_NONE)"));
                         }
                         if !Self::verify_affinity(hwnd, WDA_NONE, Duration::from_secs(2)) {
                             return Err(WinError::Other(
