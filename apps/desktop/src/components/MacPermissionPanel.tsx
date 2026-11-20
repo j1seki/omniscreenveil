@@ -4,7 +4,7 @@ import type { MacPermission, MacPermissions } from "../types";
 import { Button } from "./ui/button";
 
 const features = [
-  { id: "screen_recording", label: "Screen Recording", detail: "Required for the Veil Surface." },
+  { id: "screen_recording", label: "Screen Recording", detail: "Required for Stream capture." },
   { id: "accessibility", label: "Accessibility", detail: "Required only for strict hide." },
 ] as const;
 

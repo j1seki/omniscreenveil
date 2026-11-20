@@ -1,5 +1,25 @@
 //! Native streaming uses a persistent DXGI session, with one frame in flight
 //! per webview. Only the reduced, masked image is sent over IPC.
+pub fn frame_response(
+    armed: bool,
+    width: u32,
+    height: u32,
+    masked: usize,
+    excluded: usize,
+    mut png: Vec<u8>,
+) -> tauri::ipc::Response {
+    let mut header = [0; 17];
+    header[0] = u8::from(armed);
+    for (field, value) in
+        header[1..]
+            .chunks_exact_mut(4)
+            .zip([width, height, masked as u32, excluded as u32])
+    {
+        field.copy_from_slice(&value.to_le_bytes());
+    }
+    drop(png.splice(..0, header));
+    tauri::ipc::Response::new(png)
+}
 #[derive(Default)]
 pub struct Sessions {
     #[cfg(windows)]
@@ -12,6 +32,7 @@ pub struct Sessions {
 struct Session {
     id: u32,
     display: super::Display,
+    max_edge: u32,
     capture: veil_protect_win::stream::DesktopStream,
     snapshot: Option<(i64, Masks)>,
 }
@@ -20,16 +41,22 @@ struct Session {
 #[derive(PartialEq, Eq)]
 struct Masks {
     armed: bool,
+    excluded: std::collections::BTreeSet<veil_core::WindowId>,
     targets: Vec<(veil_core::WindowId, veil_core::Rect)>,
     own: Vec<(veil_core::WindowId, veil_core::Rect)>,
 }
 
 #[cfg(windows)]
-fn masks(
-    app: &tauri::AppHandle,
-    dashboard: Option<veil_core::WindowId>,
-    display: &super::Display,
-) -> Result<Masks, String> {
+impl Masks {
+    fn same_protection(&self, other: &Self) -> bool {
+        self.armed == other.armed
+            && self.excluded == other.excluded
+            && self.targets == other.targets
+    }
+}
+
+#[cfg(windows)]
+fn masks(app: &tauri::AppHandle, display: &super::Display) -> Result<Masks, String> {
     use tauri::Manager;
     let state = app.state::<std::sync::Mutex<super::AppState>>();
     let state = super::lock(&state)?;
@@ -41,18 +68,30 @@ fn masks(
     }
     let windows = state.engine.backend.list_windows()?;
     let armed = !state.paused && state.engine.should_arm(&windows, state.armed);
-    let targets = super::surface_targets(&state.engine, state.armed, state.paused, &windows);
+    app.state::<super::sharing::Sharing>()
+        .validate_capture(armed, &state.engine.profile)?;
+    let protection =
+        super::stream_protection(&state.engine, state.armed, state.paused, &windows, |id| {
+            state.engine.backend.native_exclusion_active(id)
+        });
+    let excluded = windows
+        .iter()
+        .filter(|w| protection.excluded.contains(&w.id) && w.bounds.intersects(&display.bounds))
+        .map(|w| w.id)
+        .collect();
     let targets = windows
         .iter()
-        .filter(|w| targets.contains(&w.id) && w.bounds.intersects(&display.bounds))
+        .filter(|w| protection.masks.contains(&w.id) && w.bounds.intersects(&display.bounds))
         .map(|w| (w.id, w.bounds))
         .collect();
-    let own = super::own_capture_masks(&state.engine.backend, dashboard)?
-        .into_iter()
-        .filter(|(_, r)| r.intersects(&display.bounds))
-        .collect();
+    let own =
+        super::own_capture_masks(&state.engine.backend, &app.state::<super::FeedbackAreas>())?
+            .into_iter()
+            .filter(|(_, r)| r.intersects(&display.bounds))
+            .collect();
     Ok(Masks {
         armed,
+        excluded,
         targets,
         own,
     })
@@ -62,13 +101,16 @@ fn masks(
 pub async fn open_stream(
     window: tauri::WebviewWindow,
     monitor: Option<String>,
+    max_edge: u32,
 ) -> Result<u32, String> {
     #[cfg(windows)]
     return tauri::async_runtime::spawn_blocking(move || {
         use std::sync::atomic::Ordering;
         use tauri::Manager;
         let app = window.app_handle();
-        let dashboard = super::dashboard_id(app);
+        if window.label() != super::sharing::LABEL || !super::sharing::active(app) {
+            return Err("Native capture requires an enabled Stream output.".into());
+        }
         let state = app.state::<std::sync::Mutex<super::AppState>>();
         let outputs = {
             let state = super::lock(&state)?;
@@ -81,9 +123,12 @@ pub async fn open_stream(
         .ok_or("Choose an available display for native streaming.")?;
         let sessions = app.state::<Sessions>();
         let mut sessions_map = sessions.inner.lock().map_err(|e| e.to_string())?;
+        if !super::sharing::active(app) {
+            return Err("Stream is off.".into());
+        }
         sessions_map.remove(window.label());
         let since = veil_protect_win::stream::DesktopStream::clock()?;
-        let before = masks(app, dashboard, &display)?;
+        let before = masks(app, &display)?;
         let capture = veil_protect_win::stream::DesktopStream::open(&display.id)?;
         let id = sessions
             .sequence
@@ -94,9 +139,14 @@ pub async fn open_stream(
             Session {
                 id,
                 display,
+                max_edge: super::preferences::clamp_stream_edge(max_edge),
                 capture,
                 snapshot: Some((since, before)),
             },
+        );
+        log::trace!(
+            "Started DXGI session {id} from the {} window",
+            window.label()
         );
         Ok(id)
     })
@@ -104,7 +154,7 @@ pub async fn open_stream(
     .map_err(|e| e.to_string())?;
     #[cfg(not(windows))]
     {
-        let _ = (window, monitor);
+        let _ = (window, monitor, max_edge);
         Err("Native streaming is currently available on Windows only.".into())
     }
 }
@@ -118,15 +168,19 @@ pub async fn next_stream_frame(
     return tauri::async_runtime::spawn_blocking(move || {
         use tauri::Manager;
         use veil_protect_win::stream::DesktopStream;
-        // Empty = unchanged. One byte = invalidate the displayed frame.
+        // Empty = unchanged. Commands [0] and [1] request a new snapshot.
+        // Only [0] first clears the last frame, for protection changes.
         let invalidate = || Ok(tauri::ipc::Response::new(vec![0u8]));
+        let refresh = || Ok(tauri::ipc::Response::new(vec![1u8]));
         let unchanged = || Ok(tauri::ipc::Response::new(Vec::<u8>::new()));
         if window.is_minimized().unwrap_or(true) || !window.is_visible().unwrap_or(false) {
             remove(&window, Some(id));
             return Err("Capture paused while this window is hidden.".into());
         }
         let app = window.app_handle();
-        let dashboard = super::dashboard_id(app);
+        if !super::sharing::active(app) {
+            return Err("Stream is off.".into());
+        }
         let sessions = app.state::<Sessions>();
         let mut sessions = sessions.inner.lock().map_err(|e| e.to_string())?;
         let session = sessions
@@ -134,7 +188,11 @@ pub async fn next_stream_frame(
             .filter(|session| session.id == id)
             .ok_or("Stream closed.")?;
         let started = DesktopStream::clock()?;
-        let before = masks(app, dashboard, &session.display)?;
+        let before = masks(app, &session.display)?;
+        let protection_changed = session
+            .snapshot
+            .as_ref()
+            .map_or(true, |(_, previous)| !previous.same_protection(&before));
         let changed = session
             .snapshot
             .as_ref()
@@ -144,18 +202,43 @@ pub async fn next_stream_frame(
         }
         let (since, before) = session.snapshot.as_ref().unwrap();
         let bounds = session.display.bounds;
-        let Some(frame) = session.capture.next(*since, (bounds.w, bounds.h))? else {
-            return if changed { invalidate() } else { unchanged() };
+        let size = super::stream_dimensions(bounds, session.max_edge);
+        let Some(mut frame) = session
+            .capture
+            .next_scaled(*since, (bounds.w, bounds.h), size)?
+        else {
+            return if protection_changed {
+                invalidate()
+            } else if changed {
+                // The desktop may have presented the window move before
+                // the new mask was sampled. A snapshot can read it now.
+                refresh()
+            } else {
+                unchanged()
+            };
         };
-        if masks(app, dashboard, &session.display)? != *before {
-            session.snapshot = None;
-            return invalidate();
+        let latest = masks(app, &session.display)?;
+        if latest != *before {
+            let invalidate_frame = protection_changed || !latest.same_protection(before);
+            session.snapshot.as_mut().unwrap().0 = DesktopStream::clock()?;
+            return if invalidate_frame {
+                invalidate()
+            } else {
+                refresh()
+            };
         }
-        let scale = (960.0 / f64::from(bounds.w.max(bounds.h))).min(1.0);
-        let width = (f64::from(bounds.w) * scale).max(1.0) as u32;
-        let height = (f64::from(bounds.h) * scale).max(1.0) as u32;
-        let mut frame = super::sample_frame(&frame, frame.bounds(), width, height);
-        for (_, r) in before.targets.iter().chain(before.own.iter()) {
+        let (width, height) = size;
+        for ((_, r), style) in before
+            .own
+            .iter()
+            .map(|mask| (mask, super::FEEDBACK_FILL))
+            .chain(
+                before
+                    .targets
+                    .iter()
+                    .map(|mask| (mask, veil_core::FillStyle::veiled())),
+            )
+        {
             let Some(local) = r
                 .intersection(&bounds)
                 .map(|r| r.translated(-bounds.x, -bounds.y))
@@ -171,11 +254,31 @@ pub async fn next_stream_frame(
                 (local.bottom() as f64 * f64::from(height) / f64::from(bounds.h)).ceil() as i32;
             frame.fill_rect(
                 veil_core::Rect::new(x, y, (right - x) as u32, (bottom - y) as u32),
-                veil_core::FillStyle::veiled(),
+                style,
             );
         }
+        let observed = super::diagnostics::CapturedFrame {
+            width,
+            height,
+            masked: before.targets.len(),
+            excluded: before.excluded.len(),
+            armed: before.armed,
+            path: "Windows DXGI Desktop Duplication".into(),
+        };
         drop(sessions);
-        super::encode_png(&frame).map(tauri::ipc::Response::new)
+        let response = frame_response(
+            observed.armed,
+            width,
+            height,
+            observed.masked,
+            observed.excluded,
+            super::encode_png(&frame)?,
+        );
+        if !super::sharing::active(app) {
+            return Err("Stream is off.".into());
+        }
+        super::diagnostics::observe_frame(window.label(), observed);
+        Ok(response)
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -202,6 +305,7 @@ pub fn remove_label(app: &tauri::AppHandle, label: &str, id: Option<u32>) {
                 .is_some_and(|session| id.is_none() || id == Some(session.id))
             {
                 sessions.remove(label);
+                log::trace!("Closed DXGI session for the {label} window");
             }
         }
     }

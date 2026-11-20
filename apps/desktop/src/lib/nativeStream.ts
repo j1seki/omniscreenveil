@@ -1,35 +1,46 @@
 import * as api from "../api";
+import type { CaptureFrame } from "../types";
 
-/** One native frame in flight. Revoke buffers as soon as they're replaced. */
-export function playNativeStream(monitor: string | null, show: (src: string | null) => void, fail: (error: string) => void) {
-  let stopped = false;
-  let id: number | undefined;
-  let url: string | undefined;
-  function paint(next?: string) {
-    if (url) URL.revokeObjectURL(url);
-    url = next;
-    show(url ?? null);
-  }
-  void (async () => {
-    try {
-      id = await api.openStream(monitor);
-      while (!stopped) {
-        const start = performance.now();
-        const buffer = await api.nextStreamFrame(id);
-        if (stopped) break;
-        if (buffer.byteLength === 1) paint();
-        else if (buffer.byteLength > 1) paint(URL.createObjectURL(new Blob([buffer], { type: "image/png" })));
-        await new Promise<void>((resolve) => window.setTimeout(resolve, Math.max(0, 83 - (performance.now() - start))));
+export function waitForFrame(delay: number, signal: AbortSignal) {
+  return new Promise<void>((resolve) => {
+    if (delay <= 0 || signal.aborted) { resolve(); return; }
+    const done = () => {
+      window.clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = window.setTimeout(done, delay);
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+
+/** Keep one frame in flight and close the capture session before restarting it. */
+export async function playNativeStream(
+  monitor: string,
+  maxEdge: number,
+  fps: number,
+  signal: AbortSignal,
+  show: (frame: CaptureFrame | null) => void,
+  refresh: () => Promise<boolean>,
+) {
+  const id = await api.openStream(monitor, maxEdge);
+  let refreshPending = false;
+  try {
+    while (!signal.aborted) {
+      const start = performance.now();
+      const buffer = await api.nextStreamFrame(id);
+      if (signal.aborted) break;
+      if (buffer.byteLength === 1) {
+        if (new Uint8Array(buffer)[0] === 0) show(null);
+        refreshPending = true;
+      } else if (buffer.byteLength > 1) {
+        show(api.readCaptureFrame(buffer));
+        refreshPending = false;
       }
-    } catch (err) {
-      if (!stopped) { paint(); fail(String(err)); }
-    } finally {
-      if (id !== undefined) void api.closeStream(id).catch(() => {});
+      if (refreshPending) refreshPending = !(await refresh());
+      await waitForFrame(1000 / fps - (performance.now() - start), signal);
     }
-  })();
-  return () => {
-    stopped = true;
-    if (url) URL.revokeObjectURL(url);
-    if (id !== undefined) void api.closeStream(id).catch(() => {});
-  };
+  } finally {
+    await api.closeStream(id).catch(() => {});
+  }
 }

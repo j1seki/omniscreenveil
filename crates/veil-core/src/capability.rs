@@ -122,15 +122,9 @@ impl PlatformCapabilities {
         let mut modes = BTreeMap::new();
         match platform {
             Platform::Windows => {
-                modes.insert(ProtectionMode::Exclusion, CapabilityLevel::Partial { detail: "Experimental: requires injecting a helper into the target process. Some applications block injection, and affinity is not proof that a capture path respects it.".into() });
-                modes.insert(ProtectionMode::Surface, CapabilityLevel::Partial { detail: "Experimental GDI capture. Test masking in your actual sharing application; capture and display scaling may differ.".into() });
-                modes.insert(
-                    ProtectionMode::StrictHide,
-                    CapabilityLevel::Partial {
-                        detail: "Uses ShowWindow; restoration after a crash is not guaranteed."
-                            .into(),
-                    },
-                );
+                for mode in ProtectionMode::ALL {
+                    modes.insert(mode, CapabilityLevel::Native);
+                }
             }
             Platform::MacOs => {
                 modes.insert(
@@ -220,7 +214,7 @@ mod tests {
         let caps = PlatformCapabilities::for_platform(Platform::Windows);
         assert_eq!(caps.best_mode(), Some(ProtectionMode::Exclusion));
         for mode in ProtectionMode::ALL {
-            assert!(caps.supports(mode), "{mode:?} should be native on Windows");
+            assert_eq!(caps.level(mode), &CapabilityLevel::Native);
         }
     }
 

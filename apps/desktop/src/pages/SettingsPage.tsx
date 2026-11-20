@@ -13,9 +13,9 @@ export function SettingsPage({ theme, onToggleTheme }: { theme: Theme; onToggleT
     if (api.IN_TAURI) void api.loginStartup().then(setAutostart, (err) => setError(String(err)));
   }, []);
 
-  async function save(next: DesktopPreferences) {
+  async function save(close_behavior: DesktopPreferences["close_behavior"]) {
     setBusy(true); setError(null);
-    try { await api.savePreferences(next); setPrefs(next); }
+    try { setPrefs(await api.savePreferences({ close_behavior })); }
     catch (err) { setError(String(err)); }
     finally { setBusy(false); }
   }
@@ -37,7 +37,7 @@ export function SettingsPage({ theme, onToggleTheme }: { theme: Theme; onToggleT
       </label>
       <label className="flex items-center justify-between gap-4 py-3">
         <span>When closing the main window <small className="block text-muted">Minimize keeps protection running. Quit releases it.</small></span>
-        <select className={selectClass} disabled={!prefs || busy} value={prefs?.close_behavior ?? "quit"} onChange={(e) => prefs && void save({ ...prefs, close_behavior: e.target.value as DesktopPreferences["close_behavior"] })}>
+        <select className={selectClass} disabled={!prefs || busy} value={prefs?.close_behavior ?? "quit"} onChange={(e) => void save(e.target.value as DesktopPreferences["close_behavior"])}>
           <option value="quit">Quit app</option><option value="minimize">Minimize</option>
         </select>
       </label>

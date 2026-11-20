@@ -47,6 +47,15 @@ pub enum DesktopBackend {
 }
 
 impl DesktopBackend {
+    pub fn native_exclusion_active(&self, window: WindowId) -> bool {
+        #[cfg(windows)]
+        if let Self::Windows(backend) = self {
+            return backend.exclusion_active(window);
+        }
+        let _ = window;
+        false
+    }
+
     /// Detect the best backend for this machine, never failing.
     pub fn detect() -> (Self, BackendInfo) {
         #[cfg(target_os = "linux")]
@@ -217,7 +226,7 @@ impl DesktopBackend {
             #[cfg(target_os = "linux")]
             Self::Wayland(backend) => backend.capture_region(region).ok(),
             #[cfg(windows)]
-            Self::Windows(backend) => backend.capture_root().ok(),
+            Self::Windows(backend) => backend.capture_region(region).ok(),
             _ => None,
         }
     }

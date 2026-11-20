@@ -8,7 +8,6 @@ use windows_sys::Win32::System::Performance::QueryPerformanceCounter;
 
 pub struct DesktopStream {
     duplication: DxgiDuplicationApi,
-    scratch: Vec<u8>,
 }
 
 impl DesktopStream {
@@ -26,10 +25,7 @@ impl DesktopStream {
                     .into(),
             );
         }
-        Ok(Self {
-            duplication,
-            scratch: Vec::new(),
-        })
+        Ok(Self { duplication })
     }
 
     /// Desktop Duplication uses QPC for desktop presents. Never mask a queued
@@ -43,6 +39,15 @@ impl DesktopStream {
     }
 
     pub fn next(&mut self, since: i64, size: (u32, u32)) -> Result<Option<Frame>, String> {
+        self.next_scaled(since, size, size)
+    }
+
+    pub fn next_scaled(
+        &mut self,
+        since: i64,
+        size: (u32, u32),
+        output: (u32, u32),
+    ) -> Result<Option<Frame>, String> {
         let mut native = match self.duplication.acquire_next_frame(100) {
             Ok(frame) => frame,
             Err(Error::Timeout) => return Ok(None),
@@ -55,10 +60,29 @@ impl DesktopStream {
         if (w, h) != size || native.format() != DxgiDuplicationFormat::Bgra8 {
             return Err("Display geometry or pixel format changed; restart the stream.".into());
         }
-        let buffer = native.buffer().map_err(|e| e.to_string())?;
-        let pixels = buffer.as_nopadding_buffer(&mut self.scratch).to_vec();
-        Frame::from_bytes(w, h, PixelFormat::Bgra8, pixels)
-            .map(Some)
-            .map_err(|e| e.to_string())
+        let (width, height) = output;
+        if width == 0 || height == 0 || width > w || height > h {
+            return Err("Invalid native stream output size.".into());
+        }
+        let mut buffer = native.buffer().map_err(|e| e.to_string())?;
+        let pitch = buffer.row_pitch() as usize;
+        let pixels = buffer.as_raw_buffer();
+        let mut frame = Frame::new(width, height, PixelFormat::Bgra8);
+        for (y, row) in frame
+            .pixels
+            .chunks_exact_mut(width as usize * 4)
+            .enumerate()
+        {
+            let from = y * h as usize / height as usize * pitch;
+            if width == w {
+                row.copy_from_slice(&pixels[from..from + row.len()]);
+            } else {
+                for (x, pixel) in row.chunks_exact_mut(4).enumerate() {
+                    let from = from + x * w as usize / width as usize * 4;
+                    pixel.copy_from_slice(&pixels[from..from + 4]);
+                }
+            }
+        }
+        Ok(Some(frame))
     }
 }

@@ -11,7 +11,6 @@ import {
   ScanSearch,
   Settings2,
   Shield,
-  ShieldCheck,
   ShieldOff,
   Sparkles,
   Sun,
@@ -19,6 +18,9 @@ import {
   Waypoints,
 } from "lucide-react";
 import * as api from "./api";
+import { useCapturePlayback } from "./lib/capturePlayback";
+import { useCaptureSettings } from "./lib/captureSettings";
+import { useCaptureFeedback } from "./lib/captureFeedback";
 import { useTheme } from "./lib/theme";
 import { useUpdater } from "./lib/updater";
 import type {
@@ -28,7 +30,6 @@ import type {
   Inventory,
   Profile,
   ProtectionMode,
-  SurfacePreview,
   TickReport,
   WindowInfo,
 } from "./types";
@@ -36,30 +37,46 @@ import { findRuleForWindow } from "./types";
 import { BackendBanner } from "./components/BackendBanner";
 import { CommandPalette, type Command as CommandType } from "./components/CommandPalette";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { DiagnosticsBar } from "./components/DiagnosticsBar";
 import { MacPermissionPanel } from "./components/MacPermissionPanel";
 import { Sidebar, type Page } from "./components/Sidebar";
 import { MOD, TitleBar } from "./components/TitleBar";
 import { Toaster, type Toast } from "./components/Toaster";
 import { TooltipProvider } from "./components/ui/tooltip";
-import { AuditPage, CapabilitiesPage, RulesPage, SurfacePage } from "./pages/InspectorPages";
+import { CapabilitiesPage, RulesPage } from "./pages/InspectorPages";
 import { OverviewPage } from "./pages/OverviewPage";
 import { UpdatesPage } from "./pages/UpdatesPage";
 import { WindowsPage } from "./pages/WindowsPage";
+import { VerifyPage } from "./pages/VerifyPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { PreviewPage } from "./pages/PreviewPage";
 
 export default function App() {
   const { theme, toggle: toggleTheme } = useTheme();
   const [page, setPage] = useState<Page>("overview");
   const [caps, setCaps] = useState<Capabilities | null>(null);
+  useCaptureFeedback(caps?.platform === "windows");
   const [matrix, setMatrix] = useState<Capabilities[]>([]);
   const [inv, setInv] = useState<Inventory | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
-  const [preview, setPreview] = useState<SurfacePreview | null>(null);
-  const [previewError, setPreviewError] = useState<string | null>(null);
-  const [rendering, setRendering] = useState(false);
-  const previewRequest = useRef(0);
-  const previewInFlight = useRef(false);
-  const [previewRevision, setPreviewRevision] = useState(0);
+  const preferences = useCaptureSettings();
+  const previewSettings = preferences.settings?.preview;
+  const previewCapture = useCapturePlayback({
+    enabled: Boolean(previewSettings) && (page === "overview" || page === "preview"),
+    display: previewSettings?.display || null,
+    edge: previewSettings?.max_edge ?? 960,
+    interval: previewSettings?.playback === "automatic" ? previewSettings.interval_ms : undefined,
+  });
+  const invalidatePreview = previewCapture.invalidate;
+  const preview = {
+    frame: previewCapture.frame,
+    message: preferences.error ?? previewCapture.message,
+    capture: previewCapture.capture,
+    manual: previewSettings?.playback === "manual",
+    ready: Boolean(previewSettings) && !preferences.saving,
+  };
+  const [streamEnabled, setStreamEnabled] = useState(false);
+  const [streamBusy, setStreamBusy] = useState(false);
   const refreshRequest = useRef(0);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -75,6 +92,7 @@ export default function App() {
   const toastId = useState(() => ({ n: 0 }))[0];
 
   const notify = useCallback((message: string, kind: Toast["kind"] = "success") => {
+    if (kind === "error") api.recordLog("error", message);
     const id = ++toastId.n;
     setToasts((t) => [...t, { id, message, kind }]);
     window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3600);
@@ -98,44 +116,43 @@ export default function App() {
     }
   }, [notify]);
 
-  const invalidatePreview = useCallback(() => {
-    ++previewRequest.current;
-    setPreview(null);
-    setPreviewError(null);
-    setRendering(false);
-  }, []);
-
-  const renderPreview = useCallback(async (monitor: string | null) => {
-    if (previewInFlight.current || document.hidden) return;
-    previewInFlight.current = true;
-    const request = ++previewRequest.current;
-    setPreviewError(null);
-    setRendering(true);
-    try {
-      const frame = await api.preview(monitor);
-      if (request === previewRequest.current) setPreview(frame);
-    } catch (err) {
-      if (request === previewRequest.current) { setPreview(null); setPreviewError(String(err)); }
-    } finally {
-      previewInFlight.current = false;
-      if (request === previewRequest.current) setRendering(false);
-    }
-  }, []);
-
   useEffect(() => {
-    if (page !== "overview") return;
-    const capture = () => { if (!document.hidden) void renderPreview(null); };
-    capture();
-    const timer = window.setInterval(capture, 2500);
-    window.addEventListener("focus", capture);
-    document.addEventListener("visibilitychange", capture);
-    return () => {
-      window.clearInterval(timer);
-      window.removeEventListener("focus", capture);
-      document.removeEventListener("visibilitychange", capture);
-      invalidatePreview();
+    if (!api.IN_TAURI) return;
+    let mounted = true;
+    let unsubscribe: (() => void) | undefined;
+    const refreshStream = () => {
+      void api.streamEnabled().then((enabled) => {
+        if (mounted) setStreamEnabled(enabled);
+      }).catch((err) => { if (mounted) notify(String(err), "error"); });
     };
-  }, [page, previewRevision, invalidatePreview, renderPreview]);
+    void listen("veil://stream-status", refreshStream).then((stop) => {
+      if (!mounted) { stop(); return; }
+      unsubscribe = stop;
+      refreshStream();
+    }).catch((err) => { if (mounted) notify(String(err), "error"); });
+    return () => { mounted = false; unsubscribe?.(); };
+  }, [notify]);
+
+  async function toggleStream(enabled: boolean) {
+    setStreamBusy(true);
+    try {
+      const status = await api.setStreamEnabled(enabled);
+      setStreamEnabled(status.enabled);
+      if (status.enabled && status.protection) {
+        const { armed, surface_rules: rules } = status.protection;
+        const surface = rules ? `${rules} enabled Surface ${rules === 1 ? "rule" : "rules"}` : "no enabled Surface rules";
+        notify(`Stream enabled · protection ${armed ? "armed" : "disarmed"} · ${surface}`, "info");
+      }
+    } catch (err) {
+      notify(String(err), "error");
+    } finally {
+      setStreamBusy(false);
+    }
+  }
+
+  function viewStream() {
+    void api.openSurface().catch((err) => notify(String(err), "error"));
+  }
 
   useEffect(() => {
     let pending = false;
@@ -197,15 +214,13 @@ export default function App() {
     let unlisten: (() => void) | undefined;
     void (async () => {
       const stop = await listen("veil://changed", () => {
-        invalidatePreview();
-        setPreviewRevision((r) => r + 1);
         void refresh("event", true);
       });
       if (cancelled) stop();
       else unlisten = stop;
     })().catch((err) => { if (!cancelled) setError(String(err)); });
     return () => { cancelled = true; unlisten?.(); };
-  }, [refresh, invalidatePreview]);
+  }, [refresh]);
 
   function reportProtection(report: TickReport, message: string) {
     const failure = report.failed.length
@@ -216,18 +231,24 @@ export default function App() {
   }
 
   async function setProtection(window: WindowInfo, enabled: boolean, mode: ProtectionMode) {
+    const ownWindow = inv?.own_window_ids?.includes(window.id);
+    if (ownWindow && findRuleForWindow(profile, window)?.target.kind === "app") {
+      notify("Edit this app-wide rule in Rules & automation.", "info");
+      return;
+    }
     setBusy(`window-${window.id}`);
     invalidatePreview();
     try {
       if (enabled) {
-        await api.addAppRule(window.app, mode);
+        if (ownWindow) await api.addWindowRule(window.id, mode);
+        else await api.addAppRule(window.app, mode);
       } else {
-        await api.removeAppRules(window.app);
+        if (!ownWindow) await api.removeAppRules(window.app);
         await api.removeWindowRules(window.id);
       }
       const report = await api.tick(false);
       await refresh("tick", true);
-      reportProtection(report, `${window.app_name} ${enabled ? "rule saved" : "rule removed"}`);
+      reportProtection(report, `${ownWindow ? window.title : window.app_name} ${enabled ? "rule saved" : "rule removed"}`);
     } catch (err) {
       setError(String(err));
       notify(String(err), "error");
@@ -269,7 +290,7 @@ export default function App() {
   async function releaseEverything() {
     if (busy) return;
     if (api.IN_TAURI) {
-      setConfirm({ title: "Disarm protection?", description: "Protected windows may become visible in the Surface or in a current share. Your rules are kept and automation is paused for this session until you arm again.", label: "Disarm", danger: true, action: () => { void disarmNow(); } });
+      setConfirm({ title: "Disarm protection?", description: "Protected windows may become visible in the Stream or in a current share. Your rules are kept. Arm protection or select an auto-arm policy to resume.", label: "Disarm", danger: true, action: () => { void disarmNow(); } });
     } else {
       await disarmNow();
     }
@@ -281,9 +302,11 @@ export default function App() {
     try {
       const report = await api.releaseAll();
       await refresh("release", true);
-      const failure = report.failed.length ? `Release failed: ${report.failed.join(", ")}` : null;
+      const failure = report.remaining || report.failed.length
+        ? `Disarm incomplete · ${report.remaining} windows still tracked. ${report.failed.join(", ")}`
+        : null;
       setError(failure);
-      notify(failure ?? "Protection off · automation paused · rules kept", failure ? "error" : "info");
+      notify(failure ?? `Protection off · ${report.released} windows released${report.automation_paused ? " · automation paused" : ""}`, failure ? "error" : "info");
     } catch (err) {
       setError(String(err));
       notify(String(err), "error");
@@ -317,7 +340,7 @@ export default function App() {
       await api.setAutoArm(v);
       await refresh("auto-arm", true);
       setError(null);
-      notify(`Auto-arm policy: ${v.replaceAll("_", " ")}`, "info");
+      notify(v === "off" ? "Manual protection selected" : "Auto-arm enabled", "info");
     } catch (err) {
       setError(String(err));
       notify(String(err), "error");
@@ -338,15 +361,15 @@ export default function App() {
   const commands: CommandType[] = [
     { id: "nav-overview", label: "Go to Overview", group: "Navigation", icon: LayoutDashboard, shortcut: `${MOD}1`, run: () => setPage("overview") },
     { id: "nav-windows", label: "Go to Windows", group: "Navigation", icon: ListFilter, shortcut: `${MOD}2`, run: () => setPage("windows") },
-    { id: "nav-surface", label: "Go to Veil Surface", group: "Navigation", icon: PanelsTopLeft, shortcut: `${MOD}3`, run: () => setPage("surface") },
-    { id: "nav-audit", label: "Go to Capture test", group: "Navigation", icon: ScanSearch, shortcut: `${MOD}4`, run: () => setPage("audit") },
+    { id: "nav-preview", label: "Go to Preview", group: "Navigation", icon: PanelsTopLeft, shortcut: `${MOD}3`, run: () => setPage("preview") },
+    { id: "nav-audit", label: "Go to Test suite", group: "Navigation", icon: ScanSearch, shortcut: `${MOD}4`, run: () => setPage("audit") },
     { id: "nav-rules", label: "Go to Rules & automation", group: "Navigation", icon: Waypoints, shortcut: `${MOD}5`, run: () => setPage("rules") },
     { id: "nav-capabilities", label: "Go to Capabilities", group: "Navigation", icon: Settings2, shortcut: `${MOD}6`, run: () => setPage("capabilities") },
     { id: "nav-updates", label: "Go to Updates", group: "Navigation", icon: Download, shortcut: `${MOD}7`, run: () => setPage("updates") },
     { id: "nav-settings", label: "Go to Settings", group: "Navigation", icon: Settings2, shortcut: `${MOD}8`, run: () => setPage("settings") },
     { id: "arm", label: isArmed ? "Disarm protection" : "Arm protection", group: "Protection", icon: isArmed ? ShieldOff : Shield, keywords: "toggle veil shield", run: toggleArm },
     { id: "protect-all", label: "Protect all windows", group: "Protection", icon: Sparkles, keywords: "bulk select everything", run: () => { void protectAllWindows(); } },
-    { id: "open-surface", label: "Open Surface window", group: "Protection", icon: PanelsTopLeft, keywords: "share screen", run: () => { void api.openSurface().catch((e) => notify(String(e), "error")); } },
+    ...(streamEnabled ? [{ id: "open-stream", label: "Open Stream viewer", group: "Protection", icon: PanelsTopLeft, keywords: "share screen", run: viewStream }] : []),
     { id: "refresh", label: "Refresh windows", group: "Verification", icon: RefreshCw, shortcut: `${MOD}R`, run: () => { void refresh(); } },
     { id: "theme", label: `Switch to ${theme === "dark" ? "light" : "dark"} theme`, group: "Preferences", icon: theme === "dark" ? Sun : Moon, shortcut: `${MOD}D`, run: toggleTheme },
     { id: "updates", label: "Check for updates", group: "Preferences", icon: Download, keywords: "upgrade release stable beta", run: () => { setPage("updates"); void updater.check("manual"); } },
@@ -364,7 +387,7 @@ export default function App() {
       if (mod && e.key.toLowerCase() === "r") { e.preventDefault(); void refresh(); return; }
       if (mod && /^[1-8]$/.test(e.key)) {
         e.preventDefault();
-        setPage((["overview", "windows", "surface", "audit", "rules", "capabilities", "updates", "settings"] as Page[])[Number(e.key) - 1]);
+        setPage((["overview", "windows", "preview", "audit", "rules", "capabilities", "updates", "settings"] as Page[])[Number(e.key) - 1]);
         return;
       }
       if (e.key === "Escape") { setPaletteOpen(false); setConfirm(null); }
@@ -406,7 +429,10 @@ export default function App() {
             onOpenPalette={openPalette}
             onRefresh={() => void refresh()}
             onToggleArm={toggleArm}
-            onOpenSurface={() => { void api.openSurface().catch((e) => notify(String(e), "error")); }}
+            streamEnabled={streamEnabled}
+            streamControlsDisabled={streamBusy || (!streamEnabled && !inv?.backend.live)}
+            onToggleStream={(enabled) => void toggleStream(enabled)}
+            onOpenStream={viewStream}
           />
 
           <div className="px-6 pt-3">
@@ -450,7 +476,6 @@ export default function App() {
                 profile={profile}
                 caps={caps}
                 preview={preview}
-                previewError={previewError}
                 busy={busy !== null}
                 backend={inv?.backend ?? null}
                 onNavigate={(p) => setPage(p)}
@@ -476,26 +501,22 @@ export default function App() {
                 onMode={(w, mode) => void setProtection(w, true, mode)}
               />
             )}
-            {page === "surface" && (
-              <SurfacePage
+            {page === "preview" && (
+              <PreviewPage
+                preferences={preferences}
                 preview={preview}
-                error={previewError}
-                busy={busy !== null || rendering}
-                onRender={renderPreview}
-                revision={previewRevision}
-                platform={caps?.platform}
-                onDisplayChange={invalidatePreview}
-                onOpen={() => { void api.openSurface().catch((e) => notify(String(e), "error")); }}
+                nativeAvailable={caps?.platform === "windows" && Boolean(inv?.backend.live)}
               />
             )}
             {page === "audit" && (
-              <AuditPage armed={isArmed} live={Boolean(inv?.backend.live)} />
+              <VerifyPage armed={isArmed} live={Boolean(inv?.backend.live)} />
             )}
             {page === "rules" && (
               <RulesPage
                 profile={profile}
                 windows={inv?.windows ?? []}
                 automationPaused={Boolean(inv?.automation_paused)}
+                captureActive={Boolean(inv?.capture_active)}
                 caps={caps}
                 onAdd={async (app: AppKey, mode: ProtectionMode, enabled: boolean) => {
                   setBusy("rules");
@@ -560,22 +581,7 @@ export default function App() {
             )}
           </main>
 
-          <footer className="flex h-8 shrink-0 items-center justify-between border-t border-border bg-app px-6 text-[10px] text-faint">
-            <span className="flex items-center gap-2">
-              <kbd className="rounded border border-border bg-panel px-1.5 py-0.5 font-mono">{MOD}K</kbd>
-              commands
-              <span className="text-border-strong">·</span>
-              <kbd className="rounded border border-border bg-panel px-1.5 py-0.5 font-mono">{MOD}D</kbd>
-              theme
-              <span className="text-border-strong">·</span>
-              <kbd className="rounded border border-border bg-panel px-1.5 py-0.5 font-mono">{MOD}1–8</kbd>
-              navigate
-            </span>
-            <span className="flex items-center gap-1.5">
-              <ShieldCheck className="size-3 text-success" />
-              No telemetry · signed GitHub updates
-            </span>
-          </footer>
+          <DiagnosticsBar notify={notify} />
         </div>
 
         <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />

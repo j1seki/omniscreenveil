@@ -1,17 +1,18 @@
-import { ChevronRight, Command, Radio, RefreshCw, Shield, Sparkles } from "lucide-react";
+import { ChevronRight, Command, Radio, RefreshCw, Shield, ShieldCheck, Sparkles } from "lucide-react";
 import type { BackendInfo, Platform } from "../types";
 import { PLATFORM_LABELS } from "../types";
 import { cn } from "../lib/utils";
 import type { Page } from "./Sidebar";
 import { Button } from "./ui/button";
+import { Switch } from "./ui/switch";
 
 export const MOD = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl+";
 
 const TITLES: Record<Page, { title: string; subtitle: string }> = {
   overview: { title: "Overview", subtitle: "Your capture privacy at a glance" },
   windows: { title: "Windows", subtitle: "Choose which windows are protected and how" },
-  surface: { title: "Veil Surface", subtitle: "The shareable, filtered view of your desktop" },
-  audit: { title: "Capture test", subtitle: "Compare real Surface captures" },
+  preview: { title: "Preview", subtitle: "Dashboard playback and Stream output settings" },
+  audit: { title: "Test suite", subtitle: "Run live capture and protection checks" },
   rules: { title: "Rules & automation", subtitle: "Persistent protection policies and auto-arm" },
   capabilities: { title: "Capabilities", subtitle: "What each operating system can actually do" },
   updates: { title: "Updates", subtitle: "Stable and beta release channels" },
@@ -27,7 +28,10 @@ export function TitleBar({
   onOpenPalette,
   onRefresh,
   onToggleArm,
-  onOpenSurface,
+  streamEnabled,
+  streamControlsDisabled,
+  onToggleStream,
+  onOpenStream,
 }: {
   page: Page;
   backend: BackendInfo | null;
@@ -37,7 +41,10 @@ export function TitleBar({
   onOpenPalette: () => void;
   onRefresh: () => void;
   onToggleArm: () => void;
-  onOpenSurface: () => void;
+  streamEnabled: boolean;
+  streamControlsDisabled: boolean;
+  onToggleStream: (enabled: boolean) => void;
+  onOpenStream: () => void;
 }) {
   const meta = TITLES[page];
   const live = backend?.live ?? false;
@@ -90,14 +97,24 @@ export function TitleBar({
         <Button
           variant="secondary"
           size="sm"
-          onClick={onOpenSurface}
-          title="Open a separate window to share instead of your desktop"
-          aria-label="Open Surface"
+          onClick={onOpenStream}
+          disabled={!streamEnabled || streamControlsDisabled}
+          title="Bring the running Stream output forward for viewing"
+          aria-label="Open Stream"
           className="h-8 gap-1.5 text-[12px]"
         >
           <Sparkles className="size-3.5 text-info" />
-          <span className="hidden sm:inline">Open Surface</span>
+          <span className="hidden sm:inline">Open Stream</span>
         </Button>
+
+        <label className="inline-flex h-8 items-center gap-2 px-1 text-[12px] text-muted">
+          Stream
+          <Switch
+            checked={streamEnabled}
+            onCheckedChange={onToggleStream}
+            disabled={streamControlsDisabled}
+          />
+        </label>
 
         <Button
           size="sm"
@@ -105,13 +122,12 @@ export function TitleBar({
           title={armed ? "Pause protection and automation; keep saved rules" : "Apply enabled protection rules"}
           aria-pressed={armed}
           disabled={busy}
-          className={cn(
-            "h-8 gap-1.5 text-[12px]",
-            armed && "border border-border-strong bg-elevated text-text shadow-none hover:bg-hover",
-          )}
+          className="shield-action h-8 text-[12px]"
         >
-          <Shield className={cn("size-3.5", !armed && "text-white")} />
-          {armed ? "Disarm" : "Arm shield"}
+          <span className="relative z-[1] flex items-center gap-1.5">
+            {armed ? <ShieldCheck className="size-3.5" /> : <Shield className="size-3.5" />}
+            {armed ? "Disarm" : "Arm shield"}
+          </span>
         </Button>
       </div>
     </header>

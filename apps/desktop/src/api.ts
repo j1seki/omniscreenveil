@@ -15,15 +15,20 @@ import type {
   Capabilities,
   Display,
   DesktopPreferences,
+  DiagnosticState,
   InstallOutcome,
   Inventory,
+  LogEntry,
   MacPermission,
   Platform,
+  PreferenceChanges,
   Profile,
   ProtectionMode,
   Rect,
+  ReleaseReport,
   Rule,
-  SurfacePreview,
+  CaptureFrame,
+  StreamStatus,
   TickReport,
   UpdateChannel,
   UpdateCheck,
@@ -51,7 +56,14 @@ let mockProfile: Profile = { version: 1, rules: [], surface: {}, auto_arm: "off"
 let mockNextRule = 1;
 let mockExplicitArmed = false;
 let mockPaused = false;
-let mockPreferences: DesktopPreferences = { close_behavior: "quit", preview_mode: "economy" };
+export const PREVIEW_PREFERENCES_KEY = "veil-desktop-settings";
+const defaultPreferences: DesktopPreferences = {
+  close_behavior: "quit",
+  preview: { playback: "automatic", display: "", max_edge: 960, interval_ms: 2000 },
+  stream: { mode: "snapshot", display: "", max_edge: 1280, fps: 12 },
+};
+let mockPreferences = defaultPreferences;
+let mockLogs: LogEntry[] = [];
 
 function mockPlatform(): Platform {
   const agent = navigator.userAgent.toLowerCase();
@@ -194,25 +206,28 @@ function mockTick(arm = true): TickReport {
   };
 }
 
-function mockPreview(): SurfacePreview {
+async function mockPreview(maxEdge: number): Promise<CaptureFrame> {
   const windows = mockWindows();
   const applied = mockApplied();
   const surfaceIds = new Set(
     applied.filter((a) => a.mode === "surface").map((a) => a.window),
   );
-  const width = 1280;
-  const height = 800;
+  const excluded = new Set(applied.filter((a) => a.mode === "exclusion").map((a) => a.window));
+  const hidden = new Set(applied.filter((a) => a.mode === "strict_hide").map((a) => a.window));
+  const scale = Math.min(1, maxEdge / 1280);
+  const width = Math.floor(1280 * scale);
+  const height = Math.floor(800 * scale);
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext("2d");
-  if (!ctx) {
-    return { png_base64: "", width, height, masked: 0, source: "preview" };
-  }
+  if (!ctx) throw new Error("Browser preview is unavailable.");
+  ctx.scale(width / 1280, height / 800);
   ctx.fillStyle = "#121622";
-  ctx.fillRect(0, 0, width, height);
+  ctx.fillRect(0, 0, 1280, 800);
   let masked = 0;
   for (const [index, window] of windows.entries()) {
+    if (excluded.has(window.id) || hidden.has(window.id)) continue;
     const { x, y, w, h } = window.bounds;
     ctx.fillStyle = DEMO_COLORS[index % DEMO_COLORS.length];
     ctx.fillRect(x, y, w, h);
@@ -229,14 +244,10 @@ function mockPreview(): SurfacePreview {
       }
     }
   }
-  const data = canvas.toDataURL("image/png");
-  return {
-    png_base64: data.slice(data.indexOf(",") + 1),
-    width,
-    height,
-    masked,
-    source: "simulated desktop (browser preview)",
-  };
+  const image = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Could not encode the preview.")), "image/png");
+  });
+  return { image, width, height, masked, excluded: excluded.size, armed: mockShouldArm(windows) };
 }
 
 // ---------------------------------------------------------------------------
@@ -321,6 +332,7 @@ export async function getProfile(): Promise<Profile> {
 export async function setAutoArm(autoArm: AutoArm): Promise<Profile> {
   if (!IN_TAURI) {
     mockProfile.auto_arm = autoArm;
+    mockPaused = false;
     return structuredClone(mockProfile);
   }
   return invoke<Profile>("set_auto_arm", { autoArm });
@@ -437,26 +449,41 @@ export async function tick(arm = true): Promise<TickReport> {
   return invoke<TickReport>("tick", { arm });
 }
 
-export async function releaseAll(): Promise<{ released: number; failed: string[] }> {
+export async function releaseAll(): Promise<ReleaseReport> {
   if (!IN_TAURI) {
     const released = mockApplied().length;
     mockExplicitArmed = false;
     mockPaused = true;
-    return { released, failed: [] };
+    return { released, failed: [], remaining: 0, automation_paused: true };
   }
-  return invoke<{ released: number; failed: string[] }>("release_all");
+  return invoke<ReleaseReport>("release_all");
 }
 
-export async function preview(monitor: string | null = null, motion = false, liveOnly = false): Promise<SurfacePreview> {
+export function readCaptureFrame(buffer: ArrayBuffer): CaptureFrame {
+  // One armed flag, followed by four little-endian u32 fields and the PNG.
+  const headerBytes = 17;
+  if (buffer.byteLength <= headerBytes) throw new Error("Incomplete capture frame.");
+  const header = new DataView(buffer);
+  return {
+    image: new Blob([new Uint8Array(buffer, headerBytes)], { type: "image/png" }),
+    armed: header.getUint8(0) === 1,
+    width: header.getUint32(1, true),
+    height: header.getUint32(5, true),
+    masked: header.getUint32(9, true),
+    excluded: header.getUint32(13, true),
+  };
+}
+
+export async function preview(monitor: string | null = null, maxEdge = 1920, liveOnly = false): Promise<CaptureFrame> {
   if (!IN_TAURI) {
     if (liveOnly) throw new Error("Open the desktop app to test real capture.");
-    return mockPreview();
+    return mockPreview(maxEdge);
   }
-  return invoke<SurfacePreview>("preview", { monitor, motion, liveOnly });
+  return readCaptureFrame(await invoke<ArrayBuffer>("preview", { monitor, maxEdge, liveOnly }));
 }
 
-export function openStream(monitor: string | null): Promise<number> {
-  return invoke("open_stream", { monitor });
+export function openStream(monitor: string, maxEdge: number): Promise<number> {
+  return invoke("open_stream", { monitor, maxEdge });
 }
 
 export function nextStreamFrame(id: number): Promise<ArrayBuffer> {
@@ -467,20 +494,19 @@ export function closeStream(id: number): Promise<void> {
   return invoke("close_stream", { id });
 }
 
-export async function openSurface(): Promise<void> {
-  if (!IN_TAURI) {
-    window.open(
-      new URL("surface.html", window.location.href).href,
-      "_blank",
-      "width=960,height=600",
-    );
-    return;
-  }
-  return invoke<void>("open_surface");
+export function streamEnabled(): Promise<boolean> {
+  return IN_TAURI ? invoke("stream_enabled") : Promise.resolve(false);
 }
 
-export async function closeSurface(): Promise<void> {
-  if (!IN_TAURI) { window.close(); return; }
+export function setStreamEnabled(enabled: boolean): Promise<StreamStatus> {
+  return invoke("set_stream_enabled", { enabled });
+}
+
+export function openSurface(): Promise<void> {
+  return invoke("open_surface");
+}
+
+export function closeSurface(): Promise<void> {
   return invoke("close_surface");
 }
 
@@ -493,16 +519,77 @@ export async function nativeWindowEvents(): Promise<boolean> {
 }
 
 export async function getPreferences(): Promise<DesktopPreferences> {
-  return IN_TAURI ? invoke("get_preferences") : mockPreferences;
+  if (IN_TAURI) return invoke("get_preferences");
+  try {
+    const json = localStorage.getItem(PREVIEW_PREFERENCES_KEY);
+    if (json) {
+      const saved = JSON.parse(json);
+      const stream = saved.stream ?? {};
+      const native = stream.mode === "native";
+      const savedFps = native ? stream.native_fps : stream.snapshot_interval_ms > 0 ? Math.round(1000 / stream.snapshot_interval_ms) : undefined;
+      mockPreferences = {
+        close_behavior: saved.close_behavior ?? defaultPreferences.close_behavior,
+        preview: {
+          ...defaultPreferences.preview,
+          ...(stream.mode === "manual" ? { playback: "manual" } : {}),
+          display: stream.display ?? defaultPreferences.preview.display,
+          ...saved.preview,
+        },
+        stream: {
+          mode: native ? "native" : "snapshot",
+          display: stream.display ?? defaultPreferences.stream.display,
+          max_edge: stream.max_edge ?? (native ? stream.native_edge : stream.snapshot_edge) ?? defaultPreferences.stream.max_edge,
+          fps: Math.max(1, Math.min(60, stream.fps ?? savedFps ?? defaultPreferences.stream.fps)),
+        },
+      };
+    }
+  } catch { /* The browser preview can also run with storage disabled. */ }
+  return mockPreferences;
 }
 
-export async function savePreferences(preferences: DesktopPreferences): Promise<void> {
-  if (!IN_TAURI) { mockPreferences = preferences; return; }
-  return invoke("save_preferences", { preferences });
+export async function savePreferences(changes: PreferenceChanges): Promise<DesktopPreferences> {
+  if (IN_TAURI) return invoke("save_preferences", { changes });
+  const current = await getPreferences();
+  mockPreferences = {
+    ...current,
+    ...changes,
+    preview: { ...current.preview, ...changes.preview },
+    stream: { ...current.stream, ...changes.stream },
+  };
+  try { localStorage.setItem(PREVIEW_PREFERENCES_KEY, JSON.stringify(mockPreferences)); }
+  catch { /* Keep the settings in memory. */ }
+  return mockPreferences;
 }
 
 export async function loginStartup(enabled?: boolean): Promise<boolean> {
   return IN_TAURI ? invoke("login_startup", { enabled }) : false;
+}
+
+export async function getLogs(): Promise<LogEntry[]> {
+  return IN_TAURI ? invoke("get_logs") : [...mockLogs];
+}
+
+export async function clearLogs(): Promise<void> {
+  if (IN_TAURI) return invoke("clear_logs");
+  mockLogs = [];
+}
+
+export async function copyLogs(text: string): Promise<void> {
+  if (IN_TAURI) return invoke("copy_logs", { text });
+  await navigator.clipboard.writeText(text);
+}
+
+export function recordLog(level: Exclude<LogEntry["level"], "trace">, message: string) {
+  if (IN_TAURI) {
+    void invoke("record_frontend_log", { level, message }).catch(() => {});
+  } else {
+    mockLogs.push({ timestamp: Date.now(), level, source: "dashboard", message });
+    if (mockLogs.length > 1_000) mockLogs.shift();
+  }
+}
+
+export async function openDevTools(): Promise<void> {
+  return invoke("open_devtools");
 }
 
 // ---------------------------------------------------------------------------
@@ -533,4 +620,16 @@ export async function installUpdate(
 export async function restartApp(): Promise<void> {
   if (!IN_TAURI) return;
   return invoke<void>("restart_app");
+}
+
+export function setFeedbackAreas(areas: Rect[]): Promise<void> {
+  return invoke("set_feedback_areas", { areas });
+}
+
+export function diagnosticState(): Promise<DiagnosticState | null> {
+  return IN_TAURI ? invoke("diagnostic_state") : Promise.resolve(null);
+}
+
+export function runVerification() {
+  return invoke<import("./types").VerificationCheck[]>("run_verification");
 }

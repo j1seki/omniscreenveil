@@ -211,3 +211,53 @@ button:disabled { cursor: not-allowed; }
   font-family: var(--font-mono);
   font-size: 12px;
 }
+
+.shield-action {
+  --shield-base: #232153;
+  --shield-bright: #5048be;
+  --shield-glow: #9bdcff;
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  color: #fff;
+  background: var(--shield-base);
+  border: 1px solid color-mix(in srgb, var(--shield-glow) 32%, var(--shield-base));
+  box-shadow: 0 2px 13px color-mix(in srgb, var(--shield-bright) 45%, transparent);
+}
+
+.shield-action[aria-pressed="true"] {
+  --shield-base: #102d2b;
+  --shield-bright: #17684e;
+  --shield-glow: #79ffd3;
+}
+
+.shield-action::before {
+  position: absolute;
+  inset: -170% -65%;
+  z-index: -2;
+  content: "";
+  background: conic-gradient(from 18deg, transparent 0 53%, var(--shield-bright) 68%, var(--shield-glow) 76%, transparent 82%);
+  animation: shield-orbit 4s linear infinite;
+}
+
+.shield-action::after {
+  position: absolute;
+  z-index: -1;
+  inset: 1px;
+  content: "";
+  border-radius: inherit;
+  background: radial-gradient(ellipse at 50% 140%, var(--shield-bright), var(--shield-base) 78%);
+  transition: filter 150ms ease;
+}
+
+.shield-action:hover::after { filter: brightness(1.27); }
+.shield-action:disabled::before { animation-play-state: paused; }
+
+.suite-section[open] > summary .suite-chevron { transform: rotate(90deg); }
+
+@keyframes shield-orbit { to { transform: rotate(1turn); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .shield-action::before { animation: none; }
+  .shield-action::after { transition: none; }
+}

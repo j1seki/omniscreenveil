@@ -15,7 +15,7 @@ blocker. It is honest about where each technique works:
 
 | Mode | What it does | Where it works |
 |---|---|---|
-| **Exclusion** | Asks the OS to omit the window from compatible capture paths while it stays usable locally. Verify your actual capture app. | **Windows only, experimental** (display affinity + a small helper loaded into the app you selected). |
+| **Exclusion** | Asks the OS to omit the window from compatible capture paths while it stays usable locally. Verify your actual capture app. | **Windows** (display affinity and a helper for selected third-party apps). |
 | **Veil Surface** | Share a window we render: a desktop copy with selected windows filtered out or masked. | **All platforms.** On Wayland it needs a geometry provider and is marked partial. |
 | **Strict hide** | Hide the window on your own screen for the session, then restore it. | **All platforms** with the right permission. |
 
@@ -229,7 +229,7 @@ and check that Surface capture and strict hide work independently.
 
 ### Verify the output you intend to share
 
-Use **Capture test** to compare live Surface frames with protection off and on.
+Use **Verify → Test suite** for automated checks and a manual Stream comparison.
 The active status in the dashboard indicates that the backend applied the rule.
 Check the receiver's view in your actual sharing app before showing sensitive
 content. The automated canary verifier compares pixels and reports
@@ -238,10 +238,10 @@ content. The automated canary verifier compares pixels and reports
 ### Windows
 
 For the portable ZIP, quit OmniScreenVeil from the tray and run
-`Uninstall-OmniScreenVeil.cmd` from the extracted folder. It removes the executable
-and helper DLL, but keeps `app-data`. Windows can keep the helper DLL locked while
-another app that used Exclude is still running. Close that app, or restart Windows
-and run the uninstaller before reopening it. The script does not force-close apps.
+`Uninstall-OmniScreenVeil.cmd` from the extracted folder. Choose whether to keep
+`app-data`. The uninstaller removes the packaged files and the folder if empty.
+If another app still has the helper DLL loaded, approve the administrator prompt
+to finish removing it at the next Windows restart.
 
 `Exclusion` injects `veil_hook_win.dll` into the process that owns the selected
 window. The main application marks windows with the
@@ -281,25 +281,34 @@ restores windows it marked before hiding, even if the window manager removed
 them from the inventory. Older builds can leave unmarked windows that need
 manual restoration with `veil release <window-id>`.
 
-The desktop app provides an **Open Surface** action (and tray entry). Share
-that dedicated window rather than your desktop. Hover along its top edge to
-select all displays or one display, refresh, or close it. The dashboard’s
-**Surface → Surface playback** controls offer
-periodic snapshots, up to five reduced-size frames per second (capture speed
-permitting), and manual refresh. On Windows, **Native stream** uses a persistent
-DXGI Desktop Duplication session for one selected display (up to 960 px, with a
-12 fps playback cap). Use snapshots for all displays together, rotated displays,
-or if your graphics adapter does not support duplication. Surface capture pauses
-when its window is minimized; the dashboard preview refreshes on Overview and
-Surface. On Windows, the dashboard has the same mode controls as other apps.
-An unprotected dashboard can appear in the separate share window, but never in
-its own embedded preview. If you choose Strict Hide for the dashboard, release
-protection from the tray menu to bring it back. The pop-out itself stays masked.
+**Stream** starts automatically when protection is armed and a Surface rule is
+enabled. Disarming or disabling the last Surface rule stops automatic output.
+You can turn **Stream** on manually in any protection state and leave it running
+until you turn it off. Turning it off during an automatic run pauses it until
+protection and a Surface rule become eligible again.
+
+Select **OmniScreenVeil Stream** as a window source in your sharing app. **Open
+Stream** brings the output window forward for viewing. Close the viewer or press
+Esc to send it behind other windows. OBS or Discord handles encoding and delivery.
+On Windows, minimizing also sends the window behind your work and keeps the
+share source running. The dashboard and Stream appear separately in Windows.
+Protection selected on either row applies to that window for the session.
+Move Stream to a display outside the capture to watch it without seeing the
+viewer in its own feed.
+
+On the **Preview** page, **Preview playback** controls the desktop preview here
+and in Overview. Choose automatic snapshots or capture a frame manually. **Stream
+quality** controls the share output’s display, resolution, and target FPS. Your
+sharing app handles its own video settings, such as bitrate. Native capture uses
+DXGI Desktop Duplication on Windows. Compatible capture supports all displays.
+The embedded Windows preview covers its image area to prevent
+feedback. If you choose Strict Hide for the dashboard, release protection from
+the tray menu to bring it back.
 
 To demonstrate or verify, stop any active share, choose a harmless test app,
-and set a Surface rule. Use **Capture test** to take real before/after frames
+and set a Surface rule. Use **Manual capture comparison** in the test suite to take real before/after frames
 with the main **Arm / Disarm** control. Disarming keeps saved rules and pauses
-automation for the current session; you can re-arm without rebuilding rules.
+automation. Select **Capture app** or **Always** again in Rules & automation to resume it.
 The comparison tests this app's output only, not another client's capture path.
 
 On backends that mask by window position, the desktop app compares protected

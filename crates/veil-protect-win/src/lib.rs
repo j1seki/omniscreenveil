@@ -75,12 +75,20 @@ impl WinBackend {
 
     /// Capture the live Windows desktop as a BGRA frame for the Veil Surface.
     pub fn capture_root(&self) -> Result<veil_surface::Frame, WinError> {
+        self.capture_region(None)
+    }
+
+    pub fn capture_region(
+        &self,
+        region: Option<veil_core::Rect>,
+    ) -> Result<veil_surface::Frame, WinError> {
         #[cfg(windows)]
         {
-            self.inner.capture_root()
+            self.inner.capture_region(region)
         }
         #[cfg(not(windows))]
         {
+            let _ = region;
             Err(WinError::NotWindows)
         }
     }
@@ -103,13 +111,36 @@ impl WinBackend {
     }
 
     #[cfg(windows)]
-    pub fn capture_masks(&self, reveal: Option<WindowId>) -> Vec<(WindowId, veil_core::Rect)> {
-        self.inner.capture_masks(reveal)
+    pub fn capture_masks(
+        &self,
+        feedback: Option<&[veil_core::Rect]>,
+    ) -> Vec<(WindowId, veil_core::Rect)> {
+        self.inner.capture_masks(feedback)
     }
 
     #[cfg(windows)]
-    pub fn register_dashboard(&mut self, id: WindowId) {
-        self.inner.dashboard = Some(id);
+    pub fn owned_window_info(&self, window: WindowId) -> Option<veil_core::WindowInfo> {
+        self.inner.owned_window(window, "", false)
+    }
+
+    #[cfg(windows)]
+    pub fn exclusion_active(&self, window: WindowId) -> bool {
+        self.inner.exclusion_active(window)
+    }
+
+    #[cfg(windows)]
+    pub fn register_dashboard(&mut self, id: WindowId, title: String) {
+        self.inner.dashboard = Some((id, title));
+    }
+
+    #[cfg(windows)]
+    pub fn track_stream_window(
+        &mut self,
+        window: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        title: String,
+    ) {
+        self.inner.stream = window;
+        self.inner.stream_title = title;
     }
 }
 
@@ -191,6 +222,10 @@ mod win {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
     use std::path::PathBuf;
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    };
     use std::time::{Duration, Instant};
 
     use windows_sys::Win32::Foundation::{
@@ -214,20 +249,20 @@ mod win {
         VirtualAllocEx, VirtualFreeEx, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
     };
     use windows_sys::Win32::System::Threading::{
-        CreateRemoteThread, GetCurrentProcess, GetCurrentProcessId, GetExitCodeThread, OpenProcess,
-        OpenProcessToken, QueryFullProcessImageNameW, WaitForSingleObject, LPTHREAD_START_ROUTINE,
-        PROCESS_CREATE_THREAD, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_OPERATION,
-        PROCESS_VM_WRITE,
+        CreateRemoteThread, GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId,
+        GetExitCodeThread, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW,
+        WaitForSingleObject, LPTHREAD_START_ROUTINE, PROCESS_CREATE_THREAD,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_WRITE,
     };
     use windows_sys::Win32::UI::Shell::ExtractAssociatedIconW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         DestroyIcon, EnumChildWindows, EnumWindows, GetClassNameW, GetIconInfo, GetSystemMetrics,
-        GetWindow, GetWindowDisplayAffinity, GetWindowLongW, GetWindowRect, GetWindowTextW,
-        GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, RemovePropW, SetPropW,
-        SetWindowDisplayAffinity, ShowWindow, ShowWindowAsync, GWL_EXSTYLE, GW_OWNER, HICON,
-        ICONINFO, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
+        GetWindow, GetWindowDisplayAffinity, GetWindowInfo, GetWindowLongW, GetWindowRect,
+        GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, RemovePropW,
+        SetPropW, SetWindowDisplayAffinity, ShowWindow, ShowWindowAsync, GWL_EXSTYLE, GW_OWNER,
+        HICON, ICONINFO, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
         SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOW, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
-        WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        WINDOWINFO, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     };
 
     use veil_core::geometry::Rect;
@@ -653,7 +688,9 @@ mod win {
     }
 
     pub struct Inner {
-        pub(super) dashboard: Option<WindowId>,
+        pub(super) dashboard: Option<(WindowId, String)>,
+        pub(super) stream: Arc<AtomicU64>,
+        pub(super) stream_title: String,
         injected: BTreeSet<u32>,
         /// window -> (pid, mode) so release knows what to undo and strict-hidden
         /// windows stay in the inventory.
@@ -665,12 +702,20 @@ mod win {
             enable_debug_privilege();
             Ok(Self {
                 dashboard: None,
+                stream: Arc::default(),
+                stream_title: String::new(),
                 injected: BTreeSet::new(),
                 protected: BTreeMap::new(),
             })
         }
 
         pub fn list_windows(&self, icons: bool) -> Result<Vec<WindowInfo>, WinError> {
+            let owned = [
+                self.dashboard
+                    .as_ref()
+                    .map(|(id, title)| (*id, title.as_str())),
+                self.stream_id().map(|id| (id, self.stream_title.as_str())),
+            ];
             let (vx, vy, _, _) = unsafe { virtual_screen_rect() };
             let mut raw: Vec<RawWindow> = Vec::new();
             unsafe {
@@ -681,7 +726,9 @@ mod win {
             // `IsWindowVisible` is now false for them; otherwise reconcile
             // would think the window closed and immediately release/re-show it!
             for (&win_id, &(pid, mode)) in &self.protected {
-                if mode != ProtectionMode::StrictHide || Some(win_id) == self.dashboard {
+                if mode != ProtectionMode::StrictHide
+                    || owned.iter().flatten().any(|(id, _)| *id == win_id)
+                {
                     continue;
                 }
                 if raw.iter().any(|w| w.hwnd as usize as u64 == win_id.0) {
@@ -753,12 +800,22 @@ mod win {
                     icon,
                 });
             }
-            out.extend(self.dashboard.and_then(|id| self.dashboard(id, icons)));
+            out.extend(
+                owned
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|(id, title)| self.owned_window(id, title, icons)),
+            );
             out.sort_by_key(|w| w.id);
             Ok(out)
         }
 
-        pub fn dashboard(&self, id: WindowId, icons: bool) -> Option<WindowInfo> {
+        fn stream_id(&self) -> Option<WindowId> {
+            let hwnd = self.stream.load(Ordering::Acquire);
+            (hwnd != 0).then_some(WindowId(hwnd))
+        }
+
+        pub fn owned_window(&self, id: WindowId, title: &str, icons: bool) -> Option<WindowInfo> {
             let (x, y, _, _) = unsafe { virtual_screen_rect() };
             let hwnd = id.0 as usize as HWND;
             let mut pid = 0;
@@ -773,7 +830,7 @@ mod win {
                 pid,
                 app: AppKey::WindowsExecutable(normalize_exe(&exe)),
                 app_name: "OmniScreenVeil".into(),
-                title: "Dashboard".into(),
+                title: title.into(),
                 bounds,
                 monitor: None,
                 visible: unsafe { IsWindowVisible(hwnd) != 0 },
@@ -787,7 +844,7 @@ mod win {
         pub fn own_windows(&self, reveal: Option<WindowId>) -> Vec<(WindowId, Rect)> {
             unsafe extern "system" fn own_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
                 let out = &mut *(lparam as *mut Vec<(WindowId, Rect)>);
-                if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 {
+                if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 || is_window_cloaked(hwnd) {
                     return TRUE;
                 }
                 let mut pid = 0u32;
@@ -813,32 +870,63 @@ mod win {
             raw
         }
 
-        pub fn capture_masks(&self, reveal: Option<WindowId>) -> Vec<(WindowId, Rect)> {
-            let mut masks = self.own_windows(reveal);
-            if let Some(dashboard) = self.dashboard {
-                // A successful native exclusion leaves the desktop behind the
-                // dashboard visible. Don't replace that area with a Surface
-                // mask. Keep the anti-recursion mask if affinity is lost or
-                // unsupported. All other app-owned windows remain masked.
-                if matches!(
-                    self.protected.get(&dashboard),
-                    Some((_, ProtectionMode::Exclusion))
-                ) {
-                    let mut affinity = WDA_NONE;
-                    let hwnd = dashboard.0 as usize as HWND;
-                    if unsafe { GetWindowDisplayAffinity(hwnd, &mut affinity) } != 0
-                        && affinity == WDA_EXCLUDEFROMCAPTURE
-                    {
-                        masks.retain(|(id, _)| *id != dashboard);
-                    }
-                }
+        pub fn capture_masks(&self, feedback: Option<&[Rect]>) -> Vec<(WindowId, Rect)> {
+            // The Stream window follows the same protection rules as other
+            // top-level windows. It has no implicit rectangle mask.
+            let mut masks = self.own_windows(self.stream_id());
+            masks.retain(|(id, _)| !self.exclusion_active(*id));
+            let Some((dashboard, areas)) = self.dashboard.as_ref().map(|(id, _)| *id).zip(feedback)
+            else {
+                return masks;
+            };
+            if !masks.iter().any(|(id, _)| *id == dashboard) {
+                return masks;
             }
+            let mut info: WINDOWINFO = unsafe { std::mem::zeroed() };
+            info.cbSize = std::mem::size_of::<WINDOWINFO>() as u32;
+            if unsafe { GetWindowInfo(dashboard.0 as usize as HWND, &mut info) } == 0 {
+                return masks;
+            }
+            let (vx, vy, _, _) = unsafe { virtual_screen_rect() };
+            let client = Rect::new(
+                info.rcClient.left - vx,
+                info.rcClient.top - vy,
+                (info.rcClient.right - info.rcClient.left).max(0) as u32,
+                (info.rcClient.bottom - info.rcClient.top).max(0) as u32,
+            );
+            masks.retain(|(id, _)| *id != dashboard);
+            masks.extend(areas.iter().filter_map(|rect| {
+                rect.translated(client.x, client.y)
+                    .intersection(&client)
+                    .map(|area| (dashboard, area))
+            }));
             masks
         }
 
-        pub fn capture_root(&self) -> Result<Frame, WinError> {
+        pub fn exclusion_active(&self, window: WindowId) -> bool {
+            if !matches!(
+                self.protected.get(&window),
+                Some((_, ProtectionMode::Exclusion))
+            ) {
+                return false;
+            }
+            let hwnd = window.0 as usize as HWND;
+            let mut affinity = WDA_NONE;
+            (unsafe { GetWindowDisplayAffinity(hwnd, &mut affinity) } != 0)
+                && affinity == WDA_EXCLUDEFROMCAPTURE
+        }
+
+        pub fn capture_region(&self, region: Option<Rect>) -> Result<Frame, WinError> {
             unsafe {
                 let (vx, vy, width, height) = virtual_screen_rect();
+                let desktop = Rect::new(0, 0, width, height);
+                let region = region.unwrap_or(desktop);
+                if region.intersection(&desktop) != Some(region) {
+                    return Err(WinError::Other(
+                        "Capture region is outside the virtual desktop".into(),
+                    ));
+                }
+                let (width, height) = (region.w, region.h);
                 let screen_dc = GetDC(std::ptr::null_mut());
                 if screen_dc.is_null() {
                     return Err(last_error("GetDC(NULL)"));
@@ -889,8 +977,8 @@ mod win {
                     width as i32,
                     height as i32,
                     screen_dc,
-                    vx,
-                    vy,
+                    vx + region.x,
+                    vy + region.y,
                     SRCCOPY | CAPTUREBLT,
                 );
                 SelectObject(mem_dc, old);
@@ -1088,6 +1176,30 @@ mod win {
             }
         }
 
+        unsafe fn set_visibility(hwnd: HWND, visible: bool) -> Result<(), WinError> {
+            if (IsWindowVisible(hwnd) != 0) == visible {
+                return Ok(());
+            }
+            let action = if visible { SW_SHOW } else { SW_HIDE };
+            if GetWindowThreadProcessId(hwnd, std::ptr::null_mut()) == GetCurrentThreadId() {
+                ShowWindow(hwnd, action);
+            } else if ShowWindowAsync(hwnd, action) == 0 {
+                return Err(last_error("ShowWindowAsync"));
+            }
+            let deadline = std::time::Instant::now() + Duration::from_millis(750);
+            loop {
+                if IsWindow(hwnd) == 0 || (IsWindowVisible(hwnd) != 0) == visible {
+                    return Ok(());
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(WinError::Other(format!(
+                        "Windows did not confirm window visibility={visible}"
+                    )));
+                }
+                std::thread::sleep(Duration::from_millis(15));
+            }
+        }
+
         pub fn apply(&mut self, intent: &ProtectionIntent) -> Result<(), WinError> {
             let hwnd = intent.window.0 as usize as HWND;
             unsafe {
@@ -1144,18 +1256,10 @@ mod win {
                     ))
                 },
                 ProtectionMode::StrictHide => {
-                    unsafe {
-                        if Some(intent.window) == self.dashboard {
-                            if ShowWindowAsync(hwnd, SW_HIDE) == 0 {
-                                return Err(last_error("ShowWindowAsync"));
-                            }
-                        } else {
-                            ShowWindow(hwnd, SW_HIDE);
-                        }
-                    }
+                    // Remember a pending OS effect so a timeout can still be released.
                     self.protected
                         .insert(intent.window, (intent.pid, ProtectionMode::StrictHide));
-                    Ok(())
+                    unsafe { Self::set_visibility(hwnd, false) }
                 }
             }
         }
@@ -1171,15 +1275,7 @@ mod win {
                     return Ok(());
                 }
                 match mode {
-                    ProtectionMode::StrictHide => {
-                        if Some(window) == self.dashboard {
-                            if ShowWindowAsync(hwnd, SW_SHOW) == 0 {
-                                return Err(last_error("ShowWindowAsync"));
-                            }
-                        } else {
-                            ShowWindow(hwnd, SW_SHOW);
-                        }
-                    }
+                    ProtectionMode::StrictHide => Self::set_visibility(hwnd, true)?,
                     ProtectionMode::Exclusion => {
                         let prop = wide(PROTECTED_PROP);
                         let _ = RemovePropW(hwnd, prop.as_ptr());
@@ -1189,10 +1285,13 @@ mod win {
                             owner_pid = pid;
                         }
                         if owner_pid == GetCurrentProcessId() {
-                            let _ = SetWindowDisplayAffinity(hwnd, WDA_NONE);
-                        } else if !Self::verify_affinity(hwnd, WDA_NONE, Duration::from_secs(2)) {
+                            if SetWindowDisplayAffinity(hwnd, WDA_NONE) == 0 {
+                                return Err(last_error("SetWindowDisplayAffinity(WDA_NONE)"));
+                            }
+                        }
+                        if !Self::verify_affinity(hwnd, WDA_NONE, Duration::from_secs(2)) {
                             return Err(WinError::Other(
-                                "Helper did not confirm exclusion was cleared".into(),
+                                "Windows did not confirm display affinity was cleared".into(),
                             ));
                         }
                     }

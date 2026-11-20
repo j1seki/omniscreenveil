@@ -2,7 +2,7 @@ import { MODES, type Capabilities } from "../types";
 
 const explanations = {
   exclusion: "Keeps the window visible to you and asks Windows to exclude it from capture. Test with the app you share from.",
-  surface: "Keeps the window usable locally and masks it in Veil Surface. Share the Surface window, not your desktop.",
+  surface: "Keeps the window usable locally and masks it in the OmniScreenVeil Stream. Share the Stream window.",
   strict_hide: "Hides the window on your desktop while armed. Disarm to restore it.",
 };
 

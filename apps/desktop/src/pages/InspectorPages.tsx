@@ -1,9 +1,6 @@
 import { useEffect, useState } from "react";
 import * as api from "../api";
 import {
-  AppWindow,
-  ExternalLink,
-  RefreshCw,
   ShieldCheck,
   Trash2,
 } from "lucide-react";
@@ -12,172 +9,22 @@ import type {
   AppKey,
   Capabilities,
   Display,
-  DesktopPreferences,
   Profile,
   ProtectionMode,
-  SurfacePreview,
+  CaptureFrame,
   WindowInfo,
 } from "../types";
-import { LEVEL_BADGES, MODES, PLATFORM_LABELS, levelDetail, modeLabel } from "../types";
+import { LEVEL_BADGES, MODES, PLATFORM_LABELS, isCaptureWindow, levelDetail, modeLabel, normalizeAppKey } from "../types";
 import { cn } from "../lib/utils";
+import { CaptureImage } from "../components/CaptureImage";
+import { AppGlyph } from "../components/icons";
 import { DisplayPicker } from "../components/DisplayPicker";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Switch } from "../components/ui/switch";
 
-/* ------------------------------ Surface ---------------------------------- */
-export function SurfacePage({
-  preview,
-  error,
-  busy,
-  onRender,
-  onDisplayChange,
-  onOpen,
-  revision,
-  platform,
-}: {
-  preview: SurfacePreview | null;
-  error: string | null;
-  busy: boolean;
-  onRender: (display: string | null) => void;
-  onDisplayChange: () => void;
-  onOpen: () => void;
-  revision: number;
-  platform?: Capabilities["platform"];
-}) {
-  const [outputs, setOutputs] = useState<Display[]>([]);
-  const [display, setDisplay] = useState<string | null>(null);
-  useEffect(() => { void api.surfaceDisplays().then(setOutputs, () => {}); }, []);
-  useEffect(() => {
-    const render = () => { if (!document.hidden) onRender(display); };
-    render();
-    const timer = window.setInterval(render, 2000);
-    window.addEventListener("focus", render);
-    document.addEventListener("visibilitychange", render);
-    return () => {
-      window.clearInterval(timer);
-      window.removeEventListener("focus", render);
-      document.removeEventListener("visibilitychange", render);
-      onDisplayChange();
-    };
-  }, [display, onRender, onDisplayChange, revision]);
-  return (
-    <div className="animate-page-in space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="text-[14px] font-semibold text-text">Live compositor preview</h2>
-          <p className="mt-0.5 text-[12px] text-muted">
-            {preview
-              ? `${preview.width}×${preview.height} · ${preview.masked} windows or regions covered · ${preview.source}`
-              : "Waiting for a preview. Use the controls below to set playback for the share window."}
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <DisplayPicker displays={outputs} value={display} onChange={(value) => { onDisplayChange(); setDisplay(value); }} />
-          <Button variant="secondary" size="sm" onClick={() => onRender(display)} disabled={busy} title="Capture a single filtered frame" className="h-8 text-[12px]">
-            <RefreshCw className={cn("size-3.5", busy && "animate-spin")} />
-            {preview ? "Re-render" : "Render preview"}
-          </Button>
-          <Button size="sm" onClick={onOpen} title="Open the shareable Surface window" className="h-8 text-[12px]">
-            <ExternalLink className="size-3.5" />
-            Open Surface window
-          </Button>
-        </div>
-      </div>
-
-      <SurfacePlayback nativeAvailable={platform === "windows" && api.IN_TAURI} />
-
-      {error && <p role="alert" className="rounded-lg border border-danger/30 bg-panel p-3 text-sm text-danger">{error}</p>}
-
-      <div className="overflow-hidden rounded-xl border border-border bg-panel">
-        <div className="flex items-center justify-between border-b border-border px-4 py-2.5">
-          <span className="flex items-center gap-2 text-[12px] text-muted">
-            <AppWindow className="size-3.5 text-accent" />
-            Composite stream
-          </span>
-          <Badge variant={preview && preview.masked ? "accent" : "default"} className="text-[10px]">
-            {preview ? `${preview.masked} veiled` : "idle"}
-          </Badge>
-        </div>
-        <div className="scan-overlay relative aspect-[16/10] bg-app">
-          {preview?.png_base64 ? (
-            <img
-              src={`data:image/png;base64,${preview.png_base64}`}
-              alt="Veil Surface preview"
-              className="size-full object-contain"
-            />
-          ) : (
-            <div className="flex h-full items-center justify-center font-mono text-[12px] text-faint">
-              [ AWAITING COMPOSITOR FRAME ]
-            </div>
-          )}
-          <div className="pointer-events-none absolute top-3 left-3 rounded border border-border bg-app/85 px-2 py-1 font-mono text-[10px] text-muted backdrop-blur">
-            ┌ VEIL_SURFACE // PREVIEW ONLY
-          </div>
-          <div className="pointer-events-none absolute right-3 bottom-3 rounded border border-border bg-app/85 px-2 py-1 font-mono text-[10px] text-accent backdrop-blur">
-            {preview ? "SNAPSHOT" : "NO FRAME"} ┘
-          </div>
-        </div>
-      </div>
-
-      <div className="grid gap-3 md:grid-cols-3">
-        {[
-          {
-            title: "Share the Surface",
-            text: "In OBS, Discord, Zoom, or your browser share dialog, select the dedicated OmniScreenVeil Surface window — not your whole desktop.",
-          },
-          {
-            title: "Stay in control locally",
-            text: "Surface rules leave windows usable locally. macOS filters them from this app’s capture; other backends mask them. Other apps’ desktop captures are unchanged.",
-          },
-          {
-            title: "Test before you share",
-            text: "Compare real Surface frames in Capture test, then check the result in your actual sharing application before exposing sensitive content.",
-          },
-        ].map((item, i) => (
-          <div key={item.title} className="rounded-lg border border-border bg-panel p-3.5">
-            <span className="font-mono text-[10px] text-faint">0{i + 1}</span>
-            <h3 className="mt-1 text-[12px] font-semibold text-text">{item.title}</h3>
-            <p className="mt-1 text-[11px] leading-relaxed text-muted">{item.text}</p>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function SurfacePlayback({ nativeAvailable }: { nativeAvailable: boolean }) {
-  const [prefs, setPrefs] = useState<DesktopPreferences | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => { void api.getPreferences().then(setPrefs, (err) => setError(String(err))); }, []);
-
-  async function change(preview_mode: DesktopPreferences["preview_mode"]) {
-    if (!prefs) return;
-    const next = { ...prefs, preview_mode };
-    setSaving(true);
-    setError(null);
-    try { await api.savePreferences(next); setPrefs(next); }
-    catch (err) { setError(String(err)); }
-    finally { setSaving(false); }
-  }
-
-  return <section className="rounded-xl border border-border bg-panel p-3">
-    <label className="flex flex-wrap items-center justify-between gap-2 text-xs">
-      <span><strong className="text-text">Surface playback</strong><small className="mt-1 block text-muted">For the separate share window. {nativeAvailable ? "Native streaming uses one display. " : ""}Playback pauses when minimized.</small></span>
-      <select className="rounded-md border border-border bg-app px-2.5 py-1.5 text-text" value={prefs?.preview_mode ?? "economy"} disabled={!prefs || saving} onChange={(e) => void change(e.target.value as DesktopPreferences["preview_mode"])}>
-        <option value="economy">Snapshots · up to 1920 px</option>
-        <option value="motion">Faster snapshots · up to 960 px</option>
-        {(nativeAvailable || prefs?.preview_mode === "native") && <option value="native" disabled={!nativeAvailable}>Native stream (Windows) · up to 960 px</option>}
-        <option value="manual">Manual refresh</option>
-      </select>
-    </label>
-    {error && <p role="alert" className="mt-2 text-xs text-danger">{error}</p>}
-  </section>;
-}
-
 export function AuditPage({ armed, live }: { armed: boolean; live: boolean }) {
-  const [frames, setFrames] = useState<{ off?: SurfacePreview; on?: SurfacePreview }>({});
+  const [frames, setFrames] = useState<{ off?: CaptureFrame; on?: CaptureFrame }>({});
   const [error, setError] = useState<string | null>(null);
   const [capturing, setCapturing] = useState(false);
   const [displays, setDisplays] = useState<Display[]>([]);
@@ -187,7 +34,7 @@ export function AuditPage({ armed, live }: { armed: boolean; live: boolean }) {
     setCapturing(true);
     setError(null);
     try {
-      const frame = await api.preview(display, false, true);
+      const frame = await api.preview(display, undefined, true);
       if (frame.armed !== armed) throw new Error("Protection changed during this step. Capture again.");
       setFrames((old) => ({ ...old, [armed ? "on" : "off"]: frame }));
     } catch (err) { setError(String(err)); }
@@ -197,11 +44,11 @@ export function AuditPage({ armed, live }: { armed: boolean; live: boolean }) {
     <section className="rounded-xl border border-warning/25 bg-warning-soft px-4 py-3 text-[12px] text-muted">
       <strong className="text-warning">Use a harmless test window and stop any active share first.</strong>{" "}
       Place the test window where it is visible, save a Surface rule for it, then capture with protection off and on. Move OmniScreenVeil out of the test window’s way. Compare the two real captures below. They stay in this page and are not saved or uploaded.
-      This tests the Veil Surface, not OBS, Zoom, or another app’s capture path.
+      This test uses OmniScreenVeil’s Stream capture path.
     </section>
     <div className="flex flex-wrap items-center gap-2">
       <fieldset disabled={capturing}><DisplayPicker displays={displays} value={display} onChange={(value) => { setDisplay(value); setFrames({}); }} /></fieldset>
-      <Button onClick={() => void capture()} disabled={!live || capturing} title="Take a real Surface snapshot with the current protection state">
+      <Button onClick={() => void capture()} disabled={!live || capturing} title="Take a real Stream snapshot with the current protection state">
         {capturing ? "Capturing…" : armed ? "Capture with protection on" : "Capture with protection off"}
       </Button>
       <Button variant="ghost" disabled={capturing || (!frames.off && !frames.on)} onClick={() => setFrames({})} title="Discard both captures">Clear captures</Button>
@@ -211,7 +58,7 @@ export function AuditPage({ armed, live }: { armed: boolean; live: boolean }) {
     <div className="grid gap-3 lg:grid-cols-2">
       {([ ["Protection off", frames.off], ["Protection on", frames.on] ] as const).map(([label, frame]) => <section key={label} className="overflow-hidden rounded-xl border border-border bg-panel">
         <h3 className="px-3 py-2 text-sm font-medium">{label}</h3>
-        {frame ? <><img className="w-full bg-black" src={`data:image/png;base64,${frame.png_base64}`} alt={`Live capture: ${label}`} /><p className="px-3 py-2 text-xs text-muted">{frame.masked} masked · {frame.source}</p></> : <p className="px-3 py-8 text-center text-xs text-muted">Not captured yet</p>}
+        {frame ? <><CaptureImage data-capture-preview className="w-full bg-black" image={frame.image} alt={`Live capture: ${label}`} /><p className="px-3 py-2 text-xs text-muted">{frame.masked} masked · {frame.excluded} excluded</p></> : <p className="px-3 py-8 text-center text-xs text-muted">Not captured yet</p>}
       </section>)}
     </div>
   </div>;
@@ -233,6 +80,7 @@ export function RulesPage({
   profile,
   windows,
   automationPaused,
+  captureActive,
   caps,
   busy,
   onAdd,
@@ -244,6 +92,7 @@ export function RulesPage({
   profile: Profile | null;
   windows: WindowInfo[];
   automationPaused: boolean;
+  captureActive: boolean;
   caps: Capabilities | null;
   busy: boolean;
   onAdd: (app: AppKey, mode: ProtectionMode, enabled: boolean) => void;
@@ -264,7 +113,21 @@ export function RulesPage({
   const hint = kind === "windows_executable" ? "Full executable path" : kind === "mac_bundle" ? "Bundle ID or .app path" : "Application ID or WM_CLASS";
   const examples = kind === "windows_executable" ? ["C:\\Apps\\Example\\Example.exe", "C:\\Apps\\Demo\\Demo.exe"] : kind === "mac_bundle" ? ["com.apple.TextEdit", "com.apple.calculator"] : ["org.gnome.Calculator", "org.gnome.TextEditor"];
   const field = "w-full rounded-md border border-border bg-app px-2.5 py-1.5 text-[12px] text-text";
-  const chosenApp = apps.find((w) => w.app.value === selection)?.app;
+  const selectedWindow = apps.find((w) => w.app.value === selection);
+  const chosenApp = selectedWindow?.app;
+  const captureApps = apps.filter(isCaptureWindow);
+  let automationStatus = "Protection is controlled by Arm and Disarm.";
+  if (active !== "off") {
+    if (automationPaused) {
+      automationStatus = `Auto-arm is paused. Select ${active === "always" ? "Always" : "Capture app"} again to resume.`;
+    } else if (active === "always") {
+      automationStatus = "Auto-arm is active and applies enabled rules as matching windows open.";
+    } else if (captureActive) {
+      automationStatus = "Capture app detected. Auto-arm is active.";
+    } else {
+      automationStatus = "Waiting for a capture app to open.";
+    }
+  }
   const manualApp: AppKey = { kind, value: identity.trim() };
   const hasApp = (app: AppKey) => rules.some((r) => r.target.kind === "app" && r.target.value.kind === app.kind && r.target.value.value.replaceAll("\\", "/").toLowerCase() === app.value.replaceAll("\\", "/").toLowerCase());
 
@@ -302,9 +165,16 @@ export function RulesPage({
             </button>
           ))}
         </div>
-        <p className="mt-2 text-[11px] text-faint">
-          {automationPaused ? "Automation is paused for this session. Arm protection to resume it." : "A running capture app is a hint, not proof of a live share. Disarming pauses auto-arm without changing this policy."}
-        </p>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <span className="text-[11px] text-muted">Detected capture apps</span>
+          {captureApps.map((app) => (
+            <span key={app.app.value} className="inline-flex items-center gap-1.5 rounded-md border border-border bg-app px-2 py-1 text-[11px] text-text">
+              <AppGlyph name={app.app_name} icon={app.icon} size={16} /> {app.app_name}
+            </span>
+          ))}
+          {captureApps.length === 0 && <span className="text-[11px] text-faint">None running</span>}
+        </div>
+        <p role="status" className="mt-2 text-[11px] text-muted">{automationStatus}</p>
       </div>
 
       <form className="space-y-3 rounded-xl border border-border bg-panel p-4" onSubmit={(e) => {
@@ -313,10 +183,16 @@ export function RulesPage({
       }}>
         <div><h3 className="text-[13px] font-semibold">Add an app rule</h3><p className="text-[11px] text-muted">App rules follow all of an app’s windows. Saving a rule for the same app replaces its current rule.</p></div>
         <div className="grid gap-3 sm:grid-cols-2">
-          <label className="space-y-1 text-xs">Application<select className={field} value={selection} onChange={(e) => setSelection(e.target.value)}>
-            <option value="">Enter an app manually</option>
-            {apps.map((w) => <option value={w.app.value} key={w.app.value}>{w.app_name} · {w.app.value}</option>)}
-          </select></label>
+          <label className="space-y-1 text-xs">
+            Application
+            <span className="flex items-center gap-2">
+              {selectedWindow && <AppGlyph name={selectedWindow.app_name} icon={selectedWindow.icon} size={22} />}
+              <select className={field} value={selection} onChange={(e) => setSelection(e.target.value)}>
+                <option value="">Enter an app manually</option>
+                {apps.map((w) => <option value={w.app.value} key={w.app.value}>{w.app_name} · {w.app.value}</option>)}
+              </select>
+            </span>
+          </label>
           {!selection && <label className="space-y-1 text-xs">{hint}<input required className={field} value={identity} onChange={(e) => setIdentity(e.target.value)} placeholder={examples[0]} /></label>}
           <label className="space-y-1 text-xs">Protection mode<select className={field} value={mode} onChange={(e) => setMode(e.target.value as ProtectionMode)}>
             {MODES.map((item) => <option key={item.id} value={item.id} disabled={caps?.modes[item.id].level === "unsupported"}>{item.label}</option>)}
@@ -358,14 +234,18 @@ export function RulesPage({
           </div>
         ) : (
           <div className="divide-y divide-border/70">
-            {rules.map((rule) => (
+            {rules.map((rule) => {
+              const target = rule.target;
+              const match = target.kind === "app"
+                ? apps.find((app) => normalizeAppKey(app.app.value) === normalizeAppKey(target.value.value))
+                : windows.find((window) => window.id === target.value);
+              const name = match?.app_name ?? (target.kind === "app" ? appLabel(target.value.value) : `Window 0x${target.value.toString(16)}`);
+              return (
               <div key={rule.id} className="flex items-center gap-3 px-4 py-2.5">
-                <ShieldCheck className={cn("size-4 shrink-0", rule.enabled ? "text-success" : "text-faint")} />
+                <AppGlyph name={name} icon={match?.icon} size={22} />
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-[12px] font-medium text-text">
-                    {rule.target.kind === "app"
-                      ? appLabel(rule.target.value.value)
-                      : `Window 0x${rule.target.value.toString(16)}`}
+                    {name}
                   </p>
                   <p className="truncate font-mono text-[10px] text-faint">
                     {rule.target.kind === "app" ? rule.target.value.value : "one-shot window handle"}
@@ -395,7 +275,8 @@ export function RulesPage({
                   <Trash2 className="size-3.5" />
                 </button>
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
@@ -411,8 +292,18 @@ export function CapabilitiesPage({
   caps: Capabilities | null;
   matrix: Capabilities[];
 }) {
+  const windowsDetails = {
+    exclusion: "Uses Windows display affinity. Some apps block the helper. Verify in the capture app you plan to use.",
+    surface: "Masks selected windows in OmniScreenVeil Stream. Supports GDI snapshots and DXGI streaming.",
+    strict_hide: "Hides windows on the Windows desktop and checks their visibility again on release.",
+  };
   return (
     <div className="animate-page-in space-y-4">
+      {caps?.platform === "windows" && (
+        <div className="flex items-center gap-3 rounded-xl border border-success/25 bg-panel px-4 py-3 text-sm">
+          <Badge variant="live">Full support</Badge> Windows supports all three protection modes.
+        </div>
+      )}
       <div className="grid gap-3 md:grid-cols-3">
         {MODES.map((mode) => {
           const level = caps?.modes[mode.id];
@@ -430,7 +321,7 @@ export function CapabilitiesPage({
                 </Badge>
               </div>
               <p className="mt-2 text-[11px] leading-relaxed text-muted">
-                {level ? levelDetail(level) : "Detecting…"}
+                {caps?.platform === "windows" ? windowsDetails[mode.id] : level ? levelDetail(level) : "Detecting…"}
               </p>
             </div>
           );
@@ -441,7 +332,7 @@ export function CapabilitiesPage({
         <div className="border-b border-border px-4 py-3">
           <h3 className="text-[13px] font-semibold text-text">Cross-platform support matrix</h3>
           <p className="mt-0.5 text-[11px] text-faint">
-            ✓ native · ◐ partial · — unsupported. No capability is claimed without a test.
+            ✓ native · ◐ partial · — unsupported
           </p>
         </div>
         <table className="w-full text-[12px]">
@@ -451,6 +342,7 @@ export function CapabilitiesPage({
               {matrix.map((entry) => (
                 <th key={entry.platform} className="px-3 py-2 text-center font-medium">
                   {PLATFORM_LABELS[entry.platform]}
+                  {entry.platform === "windows" && <span className="mt-1 block text-success">Full support</span>}
                 </th>
               ))}
             </tr>
@@ -470,7 +362,7 @@ export function CapabilitiesPage({
                         level.level === "partial" && "text-warning",
                         level.level === "unsupported" && "text-faint",
                       )}
-                      title={levelDetail(level)}
+                      title={entry.platform === "windows" ? windowsDetails[mode.id] : levelDetail(level)}
                     >
                       {LEVEL_BADGES[level.level]}
                     </td>

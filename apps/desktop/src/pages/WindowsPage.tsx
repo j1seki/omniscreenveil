@@ -260,6 +260,7 @@ export function WindowsPage({
           )}
           {[...groups].map(([key, windows]) => {
             const win = windows.find((w) => w.visible) ?? windows[0];
+            const ownWindow = inventory.own_window_ids?.includes(win.id);
             const rule = findRuleForWindow(profile, win);
             const enabled = Boolean(rule);
             const mode = rule?.mode ?? preferredMode(caps);
@@ -338,8 +339,8 @@ export function WindowsPage({
                   <Switch
                     checked={enabled}
                     disabled={busy}
-                    aria-label={`Protect ${win.app_name}`}
-                    title={enabled ? "Remove the protection rule" : "Configure protection for this app; use Arm to apply it"}
+                    aria-label={`Protect ${ownWindow ? win.title : win.app_name}`}
+                    title={enabled ? "Remove the protection rule" : ownWindow ? "Configure protection for this window" : "Configure protection for this app"}
                     onCheckedChange={() => onToggle(win)}
                   />
                 </div>

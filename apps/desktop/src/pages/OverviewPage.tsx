@@ -4,7 +4,6 @@ import {
   Monitor,
   Radio,
   ShieldCheck,
-  Sparkles,
   Target,
 } from "lucide-react";
 import type {
@@ -12,11 +11,11 @@ import type {
   Capabilities,
   Inventory,
   Profile,
-  SurfacePreview,
   WindowInfo,
 } from "../types";
 import { findRuleForWindow, isCaptureWindow, modeLabel } from "../types";
 import { cn } from "../lib/utils";
+import { PreviewPanel, type PreviewPanelProps } from "../components/PreviewPanel";
 import { AppGlyph } from "../components/icons";
 import { ActivityStrip } from "../components/Visuals";
 
@@ -58,7 +57,6 @@ export function OverviewPage({
   profile,
   caps,
   preview,
-  previewError,
   busy,
   backend,
   onNavigate,
@@ -67,11 +65,10 @@ export function OverviewPage({
   inventory: Inventory;
   profile: Profile | null;
   caps: Capabilities | null;
-  preview: SurfacePreview | null;
-  previewError: string | null;
+  preview: PreviewPanelProps;
   busy: boolean;
   backend: BackendInfo | null;
-  onNavigate: (page: "windows" | "surface" | "audit" | "capabilities") => void;
+  onNavigate: (page: "windows" | "preview" | "audit" | "capabilities") => void;
   onToggleWindow: (window: WindowInfo) => void;
 }) {
   const windows = inventory.windows;
@@ -106,7 +103,7 @@ export function OverviewPage({
             </h2>
             <p className="mt-1 max-w-[520px] text-[12px] leading-relaxed text-muted">
               {armed
-                ? "Surface rules only affect the dedicated Veil Surface window. Test your actual share before showing sensitive content."
+                ? "Surface rules mask selected windows in OmniScreenVeil’s filtered output."
                 : "Select the windows you want to protect, then arm the shield. Everything runs locally."}
             </p>
           </div>
@@ -207,41 +204,14 @@ export function OverviewPage({
           </div>
         </div>
 
-        {/* Surface preview */}
-        <div className="overflow-hidden rounded-xl border border-border bg-panel">
-          <div className="flex items-center justify-between border-b border-border px-4 py-3">
-            <div>
-              <h3 className="text-[13px] font-semibold text-text">Veil Surface</h3>
-              <p className="mt-0.5 text-[11px] text-faint">
-                {preview ? `${preview.masked} masked · ${preview.source}` : previewError ? "Preview unavailable" : "Waiting for the first frame…"}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => onNavigate("surface")}
-              className="inline-flex items-center gap-1 text-[11px] text-muted transition-colors hover:text-accent"
-            >
-              Open <ArrowRight className="size-3" />
+        <PreviewPanel
+          {...preview}
+          actions={
+            <button type="button" onClick={() => onNavigate("preview")} className="inline-flex items-center gap-1 text-[11px] text-muted transition-colors hover:text-accent">
+              Settings <ArrowRight className="size-3" />
             </button>
-          </div>
-          <div className="scan-overlay relative aspect-[16/10] bg-app">
-            {preview?.png_base64 ? (
-              <img
-                src={`data:image/png;base64,${preview.png_base64}`}
-                alt="Veil Surface preview"
-                className="size-full object-contain"
-              />
-            ) : (
-              <div className="flex h-full items-center justify-center px-4 text-center text-xs text-muted" role="status">
-                {previewError ?? "Loading Surface preview…"}
-              </div>
-            )}
-          </div>
-          <div className="flex items-center gap-2 border-t border-border px-4 py-2.5 text-[11px] text-muted">
-            <Sparkles className="size-3.5 text-info" />
-            Share the Surface window, not your whole desktop.
-          </div>
-        </div>
+          }
+        />
       </div>
     </div>
   );

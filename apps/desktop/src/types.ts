@@ -116,6 +116,7 @@ export type MacPermissions = Record<MacPermission, boolean>;
 
 export interface Inventory {
   windows: WindowInfo[];
+  own_window_ids?: number[];
   backend: BackendInfo;
   applied: AppliedProtection[];
   armed?: boolean;
@@ -135,13 +136,13 @@ export interface TickReport {
   pruned_rules: number;
 }
 
-export interface SurfacePreview {
-  armed?: boolean;
-  png_base64: string;
+export interface CaptureFrame {
+  armed: boolean;
+  image: Blob;
   width: number;
   height: number;
   masked: number;
-  source: string;
+  excluded: number;
 }
 
 export interface Display {
@@ -152,7 +153,40 @@ export interface Display {
 
 export interface DesktopPreferences {
   close_behavior: "quit" | "minimize";
-  preview_mode: "economy" | "motion" | "manual" | "native";
+  preview: PreviewSettings;
+  stream: StreamSettings;
+}
+
+export interface PreviewSettings {
+  playback: "automatic" | "manual";
+  display: string;
+  max_edge: number;
+  interval_ms: number;
+}
+
+export interface StreamSettings {
+  mode: "native" | "snapshot";
+  /** An empty string selects the whole desktop in compatible mode. */
+  display: string;
+  max_edge: number;
+  fps: number;
+}
+
+export interface StreamStatus {
+  enabled: boolean;
+  protection: { armed: boolean; surface_rules: number } | null;
+}
+
+export type PreferenceChanges = Partial<Omit<DesktopPreferences, "preview" | "stream">> & {
+  preview?: Partial<PreviewSettings>;
+  stream?: Partial<StreamSettings>;
+};
+
+export interface LogEntry {
+  timestamp: number;
+  level: "trace" | "debug" | "info" | "warn" | "error";
+  source: string;
+  message: string;
 }
 
 export const MODES: {
@@ -171,9 +205,9 @@ export const MODES: {
   },
   {
     id: "surface",
-    label: "Veil Surface",
+    label: "Surface mode",
     shortLabel: "VEIL_SURFACE",
-    blurb: "Share the filtered Veil Surface window; test masking before sharing.",
+    blurb: "Masks the window in the OmniScreenVeil Stream you share.",
     accent: "cyan",
   },
   {
@@ -276,4 +310,38 @@ export function isCaptureWindow(window: WindowInfo): boolean {
   const raw = normalizeAppKey(window.app.value);
   const base = (raw.split("/").pop() ?? raw).replace(/\.(exe|app)$/i, "");
   return KNOWN_CAPTURE_STEMS.has(name) || KNOWN_CAPTURE_STEMS.has(base);
+}
+
+export interface ReleaseReport {
+  released: number;
+  remaining: number;
+  failed: string[];
+  automation_paused: boolean;
+}
+
+export interface DiagnosticState {
+  protection: {
+    armed: boolean;
+    automation_paused: boolean;
+    policy: AutoArm;
+    capture_app_running: boolean;
+    live: boolean;
+    configured_rules: number;
+    enabled_rules: number;
+    excluded: number;
+    surface_rules_active: number;
+    hidden: number;
+    failures: string[];
+    awaiting_apply: number;
+    profile_error: string | null;
+  };
+  last_frames: Record<string, { width: number; height: number; masked: number; excluded: number; armed: boolean; path: string }>;
+}
+
+export interface VerificationCheck {
+  id: string;
+  group: string;
+  label: string;
+  status: "passed" | "failed" | "blocked";
+  evidence: string;
 }

@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>OmniScreenVeil verification target</title>
+<style>
+  body { background: #111418; color: #f4f6fa; display: grid; justify-items: center; gap: 10px; margin: 16px 0 0; font: 12px system-ui, sans-serif; }
+  canvas { image-rendering: pixelated; }
+  #pulse { width: 20px; height: 4px; }
+</style>
+<canvas width="128" height="128" role="img" aria-label="Capture verification color pattern"></canvas>
+<span>Checking capture protection…</span>
+<div id="pulse" aria-hidden="true"></div>
+<script>
+  function paintProbe(colors) {
+    const context = document.querySelector("canvas").getContext("2d");
+    for (const [index, color] of colors.entries()) {
+      context.fillStyle = color;
+      context.fillRect((index % 8) * 16, Math.floor(index / 8) * 16, 16, 16);
+    }
+  }
+  function pulseProbe(active) {
+    document.querySelector("#pulse").style.background = active ? "#f4f6fa" : "#111418";
+  }
+</script>
+</html>

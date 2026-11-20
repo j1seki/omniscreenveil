@@ -19,7 +19,7 @@ import { cn } from "../lib/utils";
 export type Page =
   | "overview"
   | "windows"
-  | "surface"
+  | "preview"
   | "audit"
   | "rules"
   | "capabilities"
@@ -35,9 +35,9 @@ const NAV: {
 }[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboard, group: "Workspace", keys: "1" },
   { id: "windows", label: "Windows", icon: ListFilter, group: "Workspace", keys: "2" },
-  { id: "surface", label: "Surface", icon: PanelsTopLeft, group: "Workspace", keys: "3" },
-  { id: "audit", label: "Capture test", icon: ScanSearch, group: "Verify", keys: "4" },
-  { id: "rules", label: "Rules & automation", icon: Waypoints, group: "Verify", keys: "5" },
+  { id: "preview", label: "Preview", icon: PanelsTopLeft, group: "Workspace", keys: "3" },
+  { id: "rules", label: "Rules & automation", icon: Waypoints, group: "Workspace", keys: "5" },
+  { id: "audit", label: "Test suite", icon: ScanSearch, group: "Verify", keys: "4" },
   { id: "capabilities", label: "Capabilities", icon: Settings2, group: "Verify", keys: "6" },
   { id: "updates", label: "Updates", icon: Download, group: "System", keys: "7" },
   { id: "settings", label: "Settings", icon: Settings2, group: "System", keys: "8" },

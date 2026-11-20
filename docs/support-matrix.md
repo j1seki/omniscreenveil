@@ -19,7 +19,7 @@ pretend otherwise.
 
 | Platform | Exclusion | Veil Surface | Strict hide | Notes |
 |---|---|---|---|---|
-| **Windows 10 2004+ / 11** | **partial / experimental** | **partial / experimental** | **partial / experimental** | Helper injection and GDI capture require native runtime validation. Test the actual capture application. |
+| **Windows 10 2004+ / 11** | **native** | **native** | **native** | All three modes are implemented. Some applications block the exclusion helper. Verify the target application and capture path on your system. |
 | **macOS 14+** | **unsupported** — no public ScreenCaptureKit exclusion API for foreign windows | **partial / experimental** | **partial / experimental** | ScreenCaptureKit and Accessibility require consent and native runtime validation. |
 | **Linux / X11** | **unsupported** | **native** | **native** | XComposite or root-window capture, with window frames included in masks. Strict hide unmaps windows. |
 | **Linux / Wayland** | **unsupported** | **partial** | **partial** | sway and Hyprland use `grim` and compositor IPC. GNOME Shell and KDE Plasma show a labelled simulation. |
