@@ -33,6 +33,9 @@ public static class OmniScreenVeilUninstall {
 '@
     if (Test-Path -LiteralPath $dll -PathType Leaf) {
         [OmniScreenVeilUninstall]::DeleteOnRestart($dll)
+        if (-not (Test-Path -LiteralPath $dll -PathType Leaf)) {
+            throw 'The helper DLL disappeared while scheduling its removal. Run the uninstaller again after restart to finish cleanup.'
+        }
     }
     if ($IncludeFolder) {
         [OmniScreenVeilUninstall]::DeleteOnRestart($PSScriptRoot)
@@ -113,6 +116,9 @@ try {
                     if ($scheduler.ExitCode -ne 0) { throw 'Windows could not schedule helper removal.' }
                 }
                 $restartRequired = Test-Path -LiteralPath $dll -PathType Leaf
+                if ($restartRequired) {
+                    Write-Host 'Windows accepted the helper DLL removal request. The DLL stays in place until the next restart.'
+                }
             }
         }
     }

@@ -1,4 +1,5 @@
 packages:
   - .
 allowBuilds:
+  '@tsc-rs/typescript': true
   esbuild: true
